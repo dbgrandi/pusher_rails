@@ -1,6 +1,6 @@
 Gem::Specification.new do |s|
   s.name    = 'pusher_rails'
-  s.version = '0.1.0'
+  s.version = '0.1.1'
   s.author  = 'David Grandinetti'
   s.email   = 'dave@wegoto12.com'
   s.summary = 'Pusher integration for Rails 3.1+'
