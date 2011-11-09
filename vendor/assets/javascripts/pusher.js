@@ -1,5 +1,5 @@
 /*!
- * Pusher JavaScript Library v1.9.1
+ * Pusher JavaScript Library v1.9.4
  * http://pusherapp.com/
  *
  * Copyright 2011, Pusher
@@ -85,12 +85,16 @@ Pusher.prototype = {
     var self = this;
     var channel = this.channels.add(channel_name, this);
     if (this.connection.state === 'connected') {
-      channel.authorize(this, function(data) {
-        self.send_event('pusher:subscribe', {
-          channel: channel_name,
-          auth: data.auth,
-          channel_data: data.channel_data
-        });
+      channel.authorize(this, function(err, data) {
+        if (err) {
+          channel.emit('subscription_error', data);
+        } else {
+          self.send_event('pusher:subscribe', {
+            channel: channel_name,
+            auth: data.auth,
+            channel_data: data.channel_data
+          });
+        }
       });
     }
     return channel;
@@ -168,7 +172,7 @@ Pusher.debug = function() {
 }
 
 // Pusher defaults
-Pusher.VERSION = '1.9.1';
+Pusher.VERSION = '1.9.4';
 
 Pusher.host = 'ws.pusherapp.com';
 Pusher.ws_port = 80;
@@ -391,6 +395,9 @@ Example:
 
     this.options = Pusher.Util.extend({encrypted: false}, options || {});
 
+    this.netInfo = new Pusher.NetInfo();
+    Pusher.EventsDispatcher.call(this.netInfo);
+
     // define the state machine that runs the connection
     this._machine = new Pusher.Machine(self, 'initialized', machineTransitions, {
 
@@ -414,7 +421,16 @@ Example:
           informUser('connecting_in', self.connectionWait);
         }
 
-        if (self.connectionAttempts > 4) {
+        if (netInfoSaysOffline() || self.connectionAttempts > 4) {
+          if(netInfoSaysOffline())
+          {
+            // called by some browsers upon reconnection to router
+            self.netInfo.bind('online', function() {
+              if(self._machine.is('waiting'))
+                self._machine.transition('connecting');
+            });
+          }
+
           triggerStateChange('unavailable');
         } else {
           triggerStateChange('connecting');
@@ -460,9 +476,7 @@ Example:
       openPre: function() {
         self.socket.onmessage = ws_onMessage;
         self.socket.onerror = ws_onError;
-        self.socket.onclose = function() {
-          self._machine.transition('waiting');
-        };
+        self.socket.onclose = transitionToWaiting;
 
         // allow time to get connected-to-Pusher message, otherwise close socket, try again
         self._openTimer = setTimeout(TransitionToImpermanentClosing, self.connectedTimeout);
@@ -488,6 +502,11 @@ Example:
         self.socket.onclose = function() {
           self._machine.transition('waiting');
         };
+        // onoffline called by some browsers on loss of connection to router
+        self.netInfo.bind('offline', function() {
+          if(self._machine.is('connected'))
+            self.socket.close();
+        });
 
         resetConnectionParameters(self);
       },
@@ -655,6 +674,13 @@ Example:
       self.emit('state_change', {previous: prevState, current: newState});
       self.emit(newState, data);
     }
+
+    // Offline means definitely offline (no connection to router).
+    // Inverse does NOT mean definitely online (only currently supported in Safari
+    // and even there only means the device has a connection to the router).
+    function netInfoSaysOffline() {
+      return self.netInfo.isOnLine() === false;
+    }
   };
 
   Connection.prototype.connect = function() {
@@ -695,8 +721,29 @@ Example:
   };
 
   Pusher.Util.extend(Connection.prototype, Pusher.EventsDispatcher.prototype);
-
   this.Pusher.Connection = Connection;
+
+  /*
+    A little bauble to interface with window.navigator.onLine,
+    window.ononline and window.onoffline.  Easier to mock.
+  */
+  var NetInfo = function() {
+    var self = this;
+    window.ononline = function() {
+      self.emit('online', null);
+    };
+    window.onoffline = function() {
+      self.emit('offline', null);
+    };
+  };
+
+  NetInfo.prototype.isOnLine = function() {
+    return window.navigator.onLine;
+  };
+
+  Pusher.Util.extend(NetInfo.prototype, Pusher.EventsDispatcher.prototype);
+  this.Pusher.Connection.NetInfo = NetInfo;
+
 }).call(this);
 
 Pusher.Channels = function() {
@@ -741,13 +788,13 @@ Pusher.Channel = function(channel_name, pusher) {
 Pusher.Channel.prototype = {
   // inheritable constructor
   init: function(){
-    
+
   },
-  
+
   disconnect: function(){
-    
+
   },
-  
+
   // Activate after successful subscription. Called on top-level pusher:subscription_succeeded
   acknowledge_subscription: function(data){
     this.subscribed = true;
@@ -756,13 +803,13 @@ Pusher.Channel.prototype = {
   is_private: function(){
     return false;
   },
-  
+
   is_presence: function(){
     return false;
   },
-  
+
   authorize: function(pusher, callback){
-    callback({}); // normal channels don't require auth
+    callback(false, {}); // normal channels don't require auth
   },
 
   trigger: function(event, data) {
@@ -789,9 +836,10 @@ Pusher.authorizers = {
       if (xhr.readyState == 4) {
         if (xhr.status == 200) {
           var data = JSON.parse(xhr.responseText);
-          callback(data);
+          callback(false, data);
         } else {
           Pusher.debug("Couldn't get auth info from your webapp", status);
+          callback(true, xhr.status);
         }
       }
     };
@@ -799,8 +847,11 @@ Pusher.authorizers = {
   },
   jsonp: function(pusher, callback){
     var qstring = 'socket_id=' + encodeURIComponent(pusher.connection.socket_id) + '&channel_name=' + encodeURIComponent(this.name);
-    var script = document.createElement("script");  
-    Pusher.auth_callbacks[this.name] = callback;
+    var script = document.createElement("script");
+    // Hacked wrapper.
+    Pusher.auth_callbacks[this.name] = function(data) {
+      callback(false, data);
+    };
     var callback_name = "Pusher.auth_callbacks['" + this.name + "']";
     script.src = Pusher.channel_auth_endpoint+'?callback='+encodeURIComponent(callback_name)+'&'+qstring;
     var head = document.getElementsByTagName("head")[0] || document.documentElement;
@@ -812,25 +863,25 @@ Pusher.Channel.PrivateChannel = {
   is_private: function(){
     return true;
   },
-  
+
   authorize: function(pusher, callback){
     Pusher.authorizers[Pusher.channel_auth_transport].scopedTo(this)(pusher, callback);
   }
 };
 
 Pusher.Channel.PresenceChannel = {
-  
+
   init: function(){
     this.bind('pusher_internal:subscription_succeeded', function(sub_data){
       this.acknowledge_subscription(sub_data);
       this.dispatch_with_all('pusher:subscription_succeeded', this.members);
     }.scopedTo(this));
-    
+
     this.bind('pusher_internal:member_added', function(data){
       var member = this.members.add(data.user_id, data.user_info);
       this.dispatch_with_all('pusher:member_added', member);
     }.scopedTo(this))
-    
+
     this.bind('pusher_internal:member_removed', function(data){
       var member = this.members.remove(data.user_id);
       if (member) {
@@ -838,21 +889,21 @@ Pusher.Channel.PresenceChannel = {
       }
     }.scopedTo(this))
   },
-  
+
   disconnect: function(){
     this.members.clear();
   },
-  
+
   acknowledge_subscription: function(sub_data){
     this.members._members_map = sub_data.presence.hash;
     this.members.count = sub_data.presence.count;
     this.subscribed = true;
   },
-  
+
   is_presence: function(){
     return true;
   },
-  
+
   members: {
     _members_map: {},
     count: 0,
@@ -882,13 +933,12 @@ Pusher.Channel.PresenceChannel = {
     },
 
     get: function(user_id) {
-      var user_info = this._members_map[user_id];
-      if (user_info) {
+      if (this._members_map.hasOwnProperty(user_id)) { // have heard of this user user_id
         return {
           id: user_id,
-          info: user_info
+          info: this._members_map[user_id]
         }
-      } else {
+      } else { // have never heard of this user
         return null;
       }
     },
@@ -968,7 +1018,7 @@ var _require = (function () {
   var root = cdn + Pusher.VERSION;
 
   var deps = [];
-  if (typeof window['JSON'] === undefined) {
+  if (typeof window['JSON'] === 'undefined') {
     deps.push(root + '/json2.js');
   }
   if (typeof window['WebSocket'] === 'undefined') {
@@ -978,6 +1028,8 @@ var _require = (function () {
   }
 
   var initialize = function() {
+    Pusher.NetInfo = Pusher.Connection.NetInfo;
+
     if (typeof window['WebSocket'] === 'undefined' && typeof window['MozWebSocket'] === 'undefined') {
       return function() {
         // This runs after flashfallback.js has loaded
