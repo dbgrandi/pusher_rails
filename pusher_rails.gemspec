@@ -8,7 +8,7 @@ Gem::Specification.new do |s|
   s.authors       = ["David Grandinetti"]
   s.email         = ["dave@wegoto12.com"]
   s.summary       = 'Pusher integration for Rails 3.1+'
-  s.description   = 'Adds pusher.js/backpusher.js to the asset pipeline and pusher-gemto to your app.'
+  s.description   = 'Adds pusher.js/backpusher.js to the asset pipeline and pusher-gem to to your app.'
   s.homepage      = 'https://github.com/dbgrandi/pusher_rails'
 
   s.add_dependency "pusher", "~> 0.8.4"
