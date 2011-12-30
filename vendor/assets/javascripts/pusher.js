@@ -1,5 +1,5 @@
 /*!
- * Pusher JavaScript Library v1.9.4
+ * Pusher JavaScript Library v1.10.1
  * http://pusherapp.com/
  *
  * Copyright 2011, Pusher
@@ -58,7 +58,6 @@ Pusher.prototype = {
   },
 
   disconnect: function() {
-    Pusher.debug('Disconnecting');
     this.connection.disconnect();
   },
 
@@ -87,7 +86,7 @@ Pusher.prototype = {
     if (this.connection.state === 'connected') {
       channel.authorize(this, function(err, data) {
         if (err) {
-          channel.emit('subscription_error', data);
+          channel.emit('pusher:subscription_error', data);
         } else {
           self.send_event('pusher:subscribe', {
             channel: channel_name,
@@ -118,8 +117,7 @@ Pusher.prototype = {
     };
     if (channel) payload['channel'] = channel;
 
-    this.connection.send(JSON.stringify(payload));
-    return this;
+    return this.connection.send(JSON.stringify(payload));
   },
 
   send_local_event: function(event_name, event_data, channel_name) {
@@ -172,7 +170,7 @@ Pusher.debug = function() {
 }
 
 // Pusher defaults
-Pusher.VERSION = '1.9.4';
+Pusher.VERSION = '1.10.1';
 
 Pusher.host = 'ws.pusherapp.com';
 Pusher.ws_port = 80;
@@ -181,6 +179,7 @@ Pusher.channel_auth_endpoint = '/pusher/auth';
 Pusher.connection_timeout = 5000;
 Pusher.cdn_http = 'http://js.pusherapp.com/'
 Pusher.cdn_https = 'https://d3ds63zw57jt09.cloudfront.net/'
+Pusher.dependency_suffix = '';
 Pusher.data_decorator = function(event_name, event_data){ return event_data }; // wrap event_data before dispatching
 Pusher.allow_reconnect = true;
 Pusher.channel_auth_transport = 'ajax';
@@ -353,6 +352,38 @@ Example:
 ;(function() {
   var Pusher = this.Pusher;
 
+  /*
+    A little bauble to interface with window.navigator.onLine,
+    window.ononline and window.onoffline.  Easier to mock.
+  */
+  var NetInfo = function() {
+    var self = this;
+    Pusher.EventsDispatcher.call(this);
+    // This is okay, as IE doesn't support this stuff anyway.
+    if (window.addEventListener !== undefined) {
+      window.addEventListener("online", function() {
+        self.emit('online', null);
+      }, false);
+      window.addEventListener("offline", function() {
+        self.emit('offline', null);
+      }, false);
+    }
+  };
+
+  // Offline means definitely offline (no connection to router).
+  // Inverse does NOT mean definitely online (only currently supported in Safari
+  // and even there only means the device has a connection to the router).
+  NetInfo.prototype.isOnLine = function() {
+    if (window.navigator.onLine === undefined) {
+      return true;
+    } else {
+      return window.navigator.onLine;
+    }
+  };
+
+  Pusher.Util.extend(NetInfo.prototype, Pusher.EventsDispatcher.prototype);
+  this.Pusher.NetInfo = Pusher.NetInfo = NetInfo;
+
   var machineTransitions = {
     'initialized': ['waiting', 'failed'],
     'waiting': ['connecting', 'permanentlyClosed'],
@@ -361,7 +392,8 @@ Example:
     'connected': ['permanentlyClosing', 'impermanentlyClosing', 'waiting'],
     'impermanentlyClosing': ['waiting', 'permanentlyClosing'],
     'permanentlyClosing': ['permanentlyClosed'],
-    'permanentlyClosed': ['waiting']
+    'permanentlyClosed': ['waiting'],
+    'failed': ['permanentlyClosing']
   };
 
 
@@ -396,7 +428,28 @@ Example:
     this.options = Pusher.Util.extend({encrypted: false}, options || {});
 
     this.netInfo = new Pusher.NetInfo();
-    Pusher.EventsDispatcher.call(this.netInfo);
+
+    this.netInfo.bind('online', function(){
+      if (self._machine.is('waiting')) {
+        self._machine.transition('connecting');
+        triggerStateChange('connecting');
+      }
+    });
+
+    this.netInfo.bind('offline', function() {
+      if (self._machine.is('connected')) {
+        // These are for Chrome 15, which ends up
+        // having two sockets hanging around.
+        self.socket.onclose = undefined;
+        self.socket.onmessage = undefined;
+        self.socket.onerror = undefined;
+        self.socket.onopen = undefined;
+
+        self.socket.close();
+        self.socket = undefined;
+        self._machine.transition('waiting');
+      }
+    });
 
     // define the state machine that runs the connection
     this._machine = new Pusher.Machine(self, 'initialized', machineTransitions, {
@@ -413,27 +466,20 @@ Example:
       },
 
       waitingPre: function() {
-        self._waitingTimer = setTimeout(function() {
-          self._machine.transition('connecting');
-        }, self.connectionWait);
-
         if (self.connectionWait > 0) {
           informUser('connecting_in', self.connectionWait);
         }
 
-        if (netInfoSaysOffline() || self.connectionAttempts > 4) {
-          if(netInfoSaysOffline())
-          {
-            // called by some browsers upon reconnection to router
-            self.netInfo.bind('online', function() {
-              if(self._machine.is('waiting'))
-                self._machine.transition('connecting');
-            });
-          }
-
+        if (self.netInfo.isOnLine() === false || self.connectionAttempts > 4){
           triggerStateChange('unavailable');
         } else {
           triggerStateChange('connecting');
+        }
+
+        if (self.netInfo.isOnLine() === true) {
+          self._waitingTimer = setTimeout(function() {
+            self._machine.transition('connecting');
+          }, self.connectionWait);
         }
       },
 
@@ -442,6 +488,15 @@ Example:
       },
 
       connectingPre: function() {
+        // Case that a user manages to get to the connecting
+        // state even when offline.
+        if (self.netInfo.isOnLine() === false) {
+          self._machine.transition('waiting');
+          triggerStateChange('unavailable');
+
+          return;
+        }
+
         // removed: if not closed, something is wrong that we should fix
         // if(self.socket !== undefined) self.socket.close();
         var url = formatURL(self.key, self.connectionSecure);
@@ -499,14 +554,7 @@ Example:
 
         self.socket.onmessage = ws_onMessage;
         self.socket.onerror = ws_onError;
-        self.socket.onclose = function() {
-          self._machine.transition('waiting');
-        };
-        // onoffline called by some browsers on loss of connection to router
-        self.netInfo.bind('offline', function() {
-          if(self._machine.is('connected'))
-            self.socket.close();
-        });
+        self.socket.onclose = transitionToWaiting;
 
         resetConnectionParameters(self);
       },
@@ -520,17 +568,24 @@ Example:
       },
 
       impermanentlyClosingPost: function() {
-        self.socket.onclose = transitionToWaiting;
-        self.socket.close();
+        if (self.socket) {
+          self.socket.onclose = transitionToWaiting;
+          self.socket.close();
+        }
       },
 
       permanentlyClosingPost: function() {
-        self.socket.onclose = function() {
+        if (self.socket) {
+          self.socket.onclose = function() {
+            resetConnectionParameters(self);
+            self._machine.transition('permanentlyClosed');
+          };
+
+          self.socket.close();
+        } else {
           resetConnectionParameters(self);
           self._machine.transition('permanentlyClosed');
-        };
-
-        self.socket.close();
+        }
       },
 
       failedPre: function() {
@@ -566,7 +621,12 @@ Example:
       var port = Pusher.ws_port;
       var protocol = 'ws://';
 
-      if (isSecure) {
+      // Always connect with SSL if the current page has
+      // been loaded via HTTPS.
+      //
+      // FUTURE: Always connect using SSL.
+      //
+      if (isSecure || document.location.protocol === 'https:') {
         port = Pusher.wss_port;
         protocol = 'wss://';
       }
@@ -608,6 +668,14 @@ Example:
         // App not found by key - close connection
         if (params.data.code === 4001) {
           self._machine.transition('permanentlyClosing');
+        }
+
+        if (params.data.code === 4000) {
+          Pusher.debug(params.data.message);
+
+          self.compulsorySecure = true;
+          self.connectionSecure = true;
+          self.options.encrypted = true;
         }
       } else if (params.event === 'pusher:heartbeat') {
       } else if (self._machine.is('connected')) {
@@ -674,18 +742,11 @@ Example:
       self.emit('state_change', {previous: prevState, current: newState});
       self.emit(newState, data);
     }
-
-    // Offline means definitely offline (no connection to router).
-    // Inverse does NOT mean definitely online (only currently supported in Safari
-    // and even there only means the device has a connection to the router).
-    function netInfoSaysOffline() {
-      return self.netInfo.isOnLine() === false;
-    }
   };
 
   Connection.prototype.connect = function() {
     // no WebSockets
-    if (Pusher.Transport === null) {
+    if (Pusher.Transport === null || typeof Pusher.Transport === 'undefined') {
       this._machine.transition('failed');
     }
     // initial open of connection
@@ -694,7 +755,7 @@ Example:
       this._machine.transition('waiting');
     }
     // user skipping connection wait
-    else if (this._machine.is('waiting')) {
+    else if (this._machine.is('waiting') && this.netInfo.isOnLine() === true) {
       this._machine.transition('connecting');
     }
     // user re-opening connection after closing it
@@ -713,6 +774,12 @@ Example:
   };
 
   Connection.prototype.disconnect = function() {
+    if (this._machine.is('permanentlyClosed')) {
+      return;
+    }
+
+    Pusher.debug('Disconnecting');
+
     if (this._machine.is('waiting')) {
       this._machine.transition('permanentlyClosed');
     } else {
@@ -722,28 +789,6 @@ Example:
 
   Pusher.Util.extend(Connection.prototype, Pusher.EventsDispatcher.prototype);
   this.Pusher.Connection = Connection;
-
-  /*
-    A little bauble to interface with window.navigator.onLine,
-    window.ononline and window.onoffline.  Easier to mock.
-  */
-  var NetInfo = function() {
-    var self = this;
-    window.ononline = function() {
-      self.emit('online', null);
-    };
-    window.onoffline = function() {
-      self.emit('offline', null);
-    };
-  };
-
-  NetInfo.prototype.isOnLine = function() {
-    return window.navigator.onLine;
-  };
-
-  Pusher.Util.extend(NetInfo.prototype, Pusher.EventsDispatcher.prototype);
-  this.Pusher.Connection.NetInfo = NetInfo;
-
 }).call(this);
 
 Pusher.Channels = function() {
@@ -778,26 +823,27 @@ Pusher.Channels.prototype = {
 };
 
 Pusher.Channel = function(channel_name, pusher) {
+  var channel = this;
   Pusher.EventsDispatcher.call(this);
 
   this.pusher = pusher;
   this.name = channel_name;
   this.subscribed = false;
+
+  this.bind('pusher_internal:subscription_succeeded', function(sub_data){
+    channel.acknowledge_subscription(sub_data);
+  });
 };
 
 Pusher.Channel.prototype = {
   // inheritable constructor
-  init: function(){
-
-  },
-
-  disconnect: function(){
-
-  },
+  init: function() {},
+  disconnect: function() {},
 
   // Activate after successful subscription. Called on top-level pusher:subscription_succeeded
   acknowledge_subscription: function(data){
     this.subscribed = true;
+    this.dispatch_with_all('pusher:subscription_succeeded');
   },
 
   is_private: function(){
@@ -813,8 +859,7 @@ Pusher.Channel.prototype = {
   },
 
   trigger: function(event, data) {
-    this.pusher.send_event(event, data, this.name);
-    return this;
+    return this.pusher.send_event(event, data, this.name);
   }
 };
 
@@ -826,17 +871,31 @@ Pusher.auth_callbacks = {};
 
 Pusher.authorizers = {
   ajax: function(pusher, callback){
-    var self = this;
-    var xhr = window.XMLHttpRequest ?
-      new XMLHttpRequest() :
-      new ActiveXObject("Microsoft.XMLHTTP");
+    var self = this, xhr;
+
+    if (Pusher.XHR) {
+      xhr = new Pusher.XHR();
+    } else {
+      xhr = (window.XMLHttpRequest ? new window.XMLHttpRequest() : new ActiveXObject("Microsoft.XMLHTTP"));
+    }
+
     xhr.open("POST", Pusher.channel_auth_endpoint, true);
     xhr.setRequestHeader("Content-Type", "application/x-www-form-urlencoded")
     xhr.onreadystatechange = function() {
       if (xhr.readyState == 4) {
         if (xhr.status == 200) {
-          var data = JSON.parse(xhr.responseText);
-          callback(false, data);
+          var data, parsed = false;
+
+          try {
+            data = JSON.parse(xhr.responseText);
+            parsed = true;
+          } catch (e) {
+            callback(true, 'JSON returned from webapp was invalid, yet status code was 200. Data was: ' + xhr.responseText);
+          }
+
+          if (parsed) { // prevents double execution.
+            callback(false, data);
+          }
         } else {
           Pusher.debug("Couldn't get auth info from your webapp", status);
           callback(true, xhr.status);
@@ -872,11 +931,6 @@ Pusher.Channel.PrivateChannel = {
 Pusher.Channel.PresenceChannel = {
 
   init: function(){
-    this.bind('pusher_internal:subscription_succeeded', function(sub_data){
-      this.acknowledge_subscription(sub_data);
-      this.dispatch_with_all('pusher:subscription_succeeded', this.members);
-    }.scopedTo(this));
-
     this.bind('pusher_internal:member_added', function(data){
       var member = this.members.add(data.user_id, data.user_info);
       this.dispatch_with_all('pusher:member_added', member);
@@ -898,6 +952,8 @@ Pusher.Channel.PresenceChannel = {
     this.members._members_map = sub_data.presence.hash;
     this.members.count = sub_data.presence.count;
     this.subscribed = true;
+
+    this.dispatch_with_all('pusher:subscription_succeeded', this.members);
   },
 
   is_presence: function(){
@@ -1016,24 +1072,22 @@ var _require = (function () {
 ;(function() {
   var cdn = (document.location.protocol == 'http:') ? Pusher.cdn_http : Pusher.cdn_https;
   var root = cdn + Pusher.VERSION;
-
   var deps = [];
+
   if (typeof window['JSON'] === 'undefined') {
-    deps.push(root + '/json2.js');
+    deps.push(root + '/json2' + Pusher.dependency_suffix + '.js');
   }
-  if (typeof window['WebSocket'] === 'undefined') {
+  if (typeof window['WebSocket'] === 'undefined' && typeof window['MozWebSocket'] === 'undefined') {
     // We manually initialize web-socket-js to iron out cross browser issues
     window.WEB_SOCKET_DISABLE_AUTO_INITIALIZATION = true;
-    deps.push(root + '/flashfallback.js');
+    deps.push(root + '/flashfallback' + Pusher.dependency_suffix + '.js');
   }
 
   var initialize = function() {
-    Pusher.NetInfo = Pusher.Connection.NetInfo;
-
     if (typeof window['WebSocket'] === 'undefined' && typeof window['MozWebSocket'] === 'undefined') {
       return function() {
         // This runs after flashfallback.js has loaded
-        if (typeof window['WebSocket'] !== 'undefined') {
+        if (typeof window['WebSocket'] !== 'undefined' && typeof window['MozWebSocket'] === 'undefined') {
           // window['WebSocket'] is a flash emulation of WebSocket
           Pusher.Transport = window['WebSocket'];
           Pusher.TransportType = 'flash';
@@ -1086,4 +1140,3 @@ var _require = (function () {
     initializeOnDocumentBody();
   }
 })();
-
