@@ -1,3 +1,7 @@
+v0.1.5
+======
+- Upgraded to pusher.js 1.10.1
+
 v0.1.4
 ======
 - Upgraded backpusher.js to pusher/backpusher@9caa3ecce01916d8bcb8da1d5997912ec3c60bf9 which fixes a problem with success/error callbacks on create/fetch calls.
