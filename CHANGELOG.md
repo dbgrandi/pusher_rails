@@ -1,3 +1,7 @@
+v0.1.6
+======
+- Upgraded to pusher.js 1.11.0
+
 v0.1.5
 ======
 - Upgraded to pusher.js 1.10.1
