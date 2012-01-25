@@ -2,7 +2,7 @@
 =====================
 
 Adds:
-- [pusher-gem v0.8.4](https://github.com/pusher/pusher-gem/tree/v0.8.4)
+- [pusher-gem v0.9.1](https://github.com/pusher/pusher-gem/tree/v0.9.1)
 - [pusher.js v1.11.0](https://github.com/pusher/pusher-js/tree/v1.11.0)
 - [backpusher.js](https://github.com/pusher/backpusher/commit/e61c9d7a761fcb48f312416408d1bf4ed418735b#diff-1)
 

@@ -3,7 +3,7 @@ $:.push File.expand_path("../lib", __FILE__)
 
 Gem::Specification.new do |s|
   s.name          = 'pusher_rails'
-  s.version       = '0.1.6'
+  s.version       = '0.2.0'
   s.platform      = Gem::Platform::RUBY
   s.authors       = ["David Grandinetti"]
   s.email         = ["dave@wegoto12.com"]
@@ -11,7 +11,7 @@ Gem::Specification.new do |s|
   s.description   = 'Adds pusher.js/backpusher.js to the asset pipeline and pusher-gem to to your app.'
   s.homepage      = 'https://github.com/dbgrandi/pusher_rails'
 
-  s.add_dependency "pusher", "~> 0.8.4"
+  s.add_dependency "pusher", "~> 0.9.1"
 
   s.files         = `git ls-files`.split("\n")
   s.require_paths = ["lib"]
