@@ -1,3 +1,7 @@
+v0.2.1
+======
+- Upgraded to pusher-gem 0.9.2
+
 v0.2.0
 ======
 - Upgraded to pusher-gem 0.9.1
