@@ -3,7 +3,7 @@ $:.push File.expand_path("../lib", __FILE__)
 
 Gem::Specification.new do |s|
   s.name          = 'pusher_rails'
-  s.version       = '0.2.0'
+  s.version       = '0.2.2'
   s.platform      = Gem::Platform::RUBY
   s.authors       = ["David Grandinetti"]
   s.email         = ["dave@wegoto12.com"]
