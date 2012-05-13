@@ -1,5 +1,5 @@
 /*!
- * Pusher JavaScript Library v1.12.0
+ * Pusher JavaScript Library v1.12.1
  * http://pusherapp.com/
  *
  * Copyright 2011, Pusher
@@ -183,7 +183,7 @@
   };
 
   // Pusher defaults
-  Pusher.VERSION = '1.12.0';
+  Pusher.VERSION = '1.12.1';
 
   Pusher.host = 'ws.pusherapp.com';
   Pusher.ws_port = 80;
@@ -399,11 +399,11 @@ Example:
     'waiting': ['connecting', 'permanentlyClosed'],
     'connecting': ['open', 'permanentlyClosing', 'impermanentlyClosing', 'waiting'],
     'open': ['connected', 'permanentlyClosing', 'impermanentlyClosing', 'waiting'],
-    'connected': ['permanentlyClosing', 'impermanentlyClosing', 'waiting'],
+    'connected': ['permanentlyClosing', 'waiting'],
     'impermanentlyClosing': ['waiting', 'permanentlyClosing'],
     'permanentlyClosing': ['permanentlyClosed'],
     'permanentlyClosed': ['waiting'],
-    'failed': ['permanentlyClosing']
+    'failed': ['permanentlyClosed']
   };
 
 
@@ -507,8 +507,6 @@ Example:
           return;
         }
 
-        // removed: if not closed, something is wrong that we should fix
-        // if(self.socket !== undefined) self.socket.close();
         var url = formatURL(self.key, self.connectionSecure);
         Pusher.debug('Connecting', url);
         self.socket = new Pusher.Transport(url);
@@ -519,7 +517,7 @@ Example:
         self.socket.onerror = ws_onError;
 
         // allow time to get ws_onOpen, otherwise close socket and try again
-        self._connectingTimer = setTimeout(TransitionToImpermanentClosing, self.openTimeout);
+        self._connectingTimer = setTimeout(TransitionToImpermanentlyClosing, self.openTimeout);
       },
 
       connectingExit: function() {
@@ -545,7 +543,7 @@ Example:
         self.socket.onclose = transitionToWaiting;
 
         // allow time to get connected-to-Pusher message, otherwise close socket, try again
-        self._openTimer = setTimeout(TransitionToImpermanentClosing, self.connectedTimeout);
+        self._openTimer = setTimeout(TransitionToImpermanentlyClosing, self.connectedTimeout);
       },
 
       openExit: function() {
@@ -659,7 +657,7 @@ Example:
     }
 
     // callback for close and retry.  Used on timeouts.
-    function TransitionToImpermanentClosing() {
+    function TransitionToImpermanentlyClosing() {
       self._machine.transition('impermanentlyClosing');
     }
 
@@ -717,7 +715,7 @@ Example:
         self.connectionSecure = true;
         self.options.encrypted = true;
 
-        self._machine.transition('impermanentlyClosing')
+        TransitionToImpermanentlyClosing();
       } else if (code < 4100) {
         // Permentently close connection
         self._machine.transition('permanentlyClosing')
@@ -727,7 +725,7 @@ Example:
         self._machine.transition('waiting')
       } else if (code < 4300) {
         // Reconnect immediately
-        self._machine.transition('impermanentlyClosing')
+        TransitionToImpermanentlyClosing();
       } else {
         // Unknown error
         self._machine.transition('permanentlyClosing')
@@ -796,14 +794,9 @@ Example:
       self._machine.transition('waiting');
     }
 
-    function ws_onError() {
-      self.emit('error', {
-        type: 'WebSocketError'
-      });
-
-      // note: required? is the socket auto closed in the case of error?
-      self.socket.close();
-      self._machine.transition('impermanentlyClosing');
+    function ws_onError(error) {
+      // just emit error to user - socket will already be closed by browser
+      self.emit('error', { type: 'WebSocketError', error: error });
     }
 
     // Updates the public state information exposed by connection
@@ -877,7 +870,7 @@ Example:
   Connection.prototype.disconnect = function() {
     if (this._machine.is('permanentlyClosed')) return;
 
-    if (this._machine.is('waiting')) {
+    if (this._machine.is('waiting') || this._machine.is('failed')) {
       this._machine.transition('permanentlyClosed');
     } else {
       this._machine.transition('permanentlyClosing');
