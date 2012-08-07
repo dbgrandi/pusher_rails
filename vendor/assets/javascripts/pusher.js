@@ -1,5 +1,5 @@
 /*!
- * Pusher JavaScript Library v1.12.1
+ * Pusher JavaScript Library v1.12.2
  * http://pusherapp.com/
  *
  * Copyright 2011, Pusher
@@ -183,7 +183,7 @@
   };
 
   // Pusher defaults
-  Pusher.VERSION = '1.12.1';
+  Pusher.VERSION = '1.12.2';
 
   Pusher.host = 'ws.pusherapp.com';
   Pusher.ws_port = 80;
@@ -220,44 +220,67 @@ Example:
     emitter.bind('foo_event', function(data){ alert(data)} );
 
     // Bind to all
-    emitter.bind_all(function(event_name, data){ alert(data) });
+    emitter.bind_all(function(eventName, data){ alert(data) });
 
 --------------------------------------------------------*/
+
+  function CallbackRegistry() {
+    this._callbacks = {};
+  };
+
+  CallbackRegistry.prototype.get = function(eventName) {
+    return this._callbacks[this._prefix(eventName)];
+  };
+
+  CallbackRegistry.prototype.add = function(eventName, callback) {
+    var prefixedEventName = this._prefix(eventName);
+    this._callbacks[prefixedEventName] = this._callbacks[prefixedEventName] || [];
+    this._callbacks[prefixedEventName].push(callback);
+  };
+
+  CallbackRegistry.prototype.remove = function(eventName, callback) {
+    if(this.get(eventName)) {
+      var index = Pusher.Util.arrayIndexOf(this.get(eventName), callback);
+      this._callbacks[this._prefix(eventName)].splice(index, 1);
+    }
+  };
+
+  CallbackRegistry.prototype._prefix = function(eventName) {
+    return "_" + eventName;
+  };
+
+
   function EventsDispatcher(failThrough) {
-    this.callbacks = {};
+    this.callbacks = new CallbackRegistry();
     this.global_callbacks = [];
     // Run this function when dispatching an event when no callbacks defined
     this.failThrough = failThrough;
   }
 
-  EventsDispatcher.prototype.bind = function(event_name, callback) {
-    this.callbacks[event_name] = this.callbacks[event_name] || [];
-    this.callbacks[event_name].push(callback);
+  EventsDispatcher.prototype.bind = function(eventName, callback) {
+    this.callbacks.add(eventName, callback);
     return this;// chainable
   };
 
   EventsDispatcher.prototype.unbind = function(eventName, callback) {
-    if(this.callbacks[eventName]) {
-      var index = Pusher.Util.arrayIndexOf(this.callbacks[eventName], callback);
-      this.callbacks[eventName].splice(index, 1);
-    }
+    this.callbacks.remove(eventName, callback);
     return this;
   };
 
-  EventsDispatcher.prototype.emit = function(event_name, data) {
+  EventsDispatcher.prototype.emit = function(eventName, data) {
     // Global callbacks
     for (var i = 0; i < this.global_callbacks.length; i++) {
-      this.global_callbacks[i](event_name, data);
+      this.global_callbacks[i](eventName, data);
     }
 
     // Event callbacks
-    var callbacks = this.callbacks[event_name];
+    var callbacks = this.callbacks.get(eventName);
     if (callbacks) {
       for (var i = 0; i < callbacks.length; i++) {
         callbacks[i](data);
       }
     } else if (this.failThrough) {
-      this.failThrough(event_name, data)
+      this.failThrough(eventName, data)
     }
 
     return this;
@@ -402,7 +425,7 @@ Example:
     'connected': ['permanentlyClosing', 'waiting'],
     'impermanentlyClosing': ['waiting', 'permanentlyClosing'],
     'permanentlyClosing': ['permanentlyClosed'],
-    'permanentlyClosed': ['waiting'],
+    'permanentlyClosed': ['waiting', 'failed'],
     'failed': ['permanentlyClosed']
   };
 
@@ -819,7 +842,7 @@ Example:
 
   Connection.prototype.connect = function() {
     // no WebSockets
-    if (Pusher.Transport === null || Pusher.Transport === undefined) {
+    if (!this._machine.is('failed') && !Pusher.Transport) {
       this._machine.transition('failed');
     }
     // initial open of connection
@@ -840,17 +863,12 @@ Example:
 
   Connection.prototype.send = function(data) {
     if (this._machine.is('connected')) {
-      // Bug in iOS (reproduced in 5.0.1) Mobile Safari:
-      // 1. Open page/tab, connect WS, get some data.
-      // 2. Switch tab or close Mobile Safari and wait for WS connection to get closed (probably by server).
-      // 3. Switch back to tab or open Mobile Safari and Mobile Safari crashes.
-      // The problem is that WS tries to send data on closed WS connection before it realises it is closed.
-      // The timeout means that by the time the send happens, the WS readyState correctly reflects closed state.
+      // Workaround for MobileSafari bug (see https://gist.github.com/2052006)
       var self = this;
       setTimeout(function() {
         self.socket.send(data);
       }, 0);
-      return true; // only a reflection of fact that WS thinks it is open - could get returned before some lower-level failure.
+      return true;
     } else {
       return false;
     }
@@ -1145,73 +1163,82 @@ Example:
     }
   };
 }).call(this);
-var _require = (function () {
-
-  var handleScriptLoaded;
-  if (document.addEventListener) {
-    handleScriptLoaded = function (elem, callback) {
-      elem.addEventListener('load', callback, false)
-    }
-  } else {
-    handleScriptLoaded = function(elem, callback) {
+// _require(dependencies, callback) takes an array of dependency urls and a
+// callback to call when all the dependecies have finished loading
+var _require = (function() {
+  function handleScriptLoaded(elem, callback) {
+    if (document.addEventListener) {
+      elem.addEventListener('load', callback, false);
+    } else {
       elem.attachEvent('onreadystatechange', function () {
-        if(elem.readyState == 'loaded' || elem.readyState == 'complete') callback()
-      })
+        if (elem.readyState == 'loaded' || elem.readyState == 'complete') {
+          callback();
+        }
+      });
     }
   }
 
-  return function (deps, callback) {
-    var dep_count = 0,
-    dep_length = deps.length;
+  function addScript(src, callback) {
+    var head = document.getElementsByTagName('head')[0];
+    var script = document.createElement('script');
+    script.setAttribute('src', src);
+    script.setAttribute("type","text/javascript");
+    script.setAttribute('async', true);
 
-    function checkReady (callback) {
-      dep_count++;
-      if ( dep_length == dep_count ) {
-        // Opera needs the timeout for page initialization weirdness
-        setTimeout(callback, 0);
-      }
-    }
+    handleScriptLoaded(script, function() {
+      callback();
+    });
 
-    function addScript (src, callback) {
-      callback = callback || function(){}
-      var head = document.getElementsByTagName('head')[0];
-      var script = document.createElement('script');
-      script.setAttribute('src', src);
-      script.setAttribute("type","text/javascript");
-      script.setAttribute('async', true);
+    head.appendChild(script);
+  }
 
-      handleScriptLoaded(script, function () {
-        checkReady(callback);
+  return function(deps, callback) {
+    var deps_loaded = 0;
+    for (var i = 0; i < deps.length; i++) {
+      addScript(deps[i], function() {
+        if (deps.length == ++deps_loaded) {
+          // This setTimeout is a workaround for an Opera issue
+          setTimeout(callback, 0);
+        }
       });
-
-      head.appendChild(script);
-    }
-
-    for(var i = 0; i < dep_length; i++) {
-      addScript(deps[i], callback);
     }
   }
 })();
 
 ;(function() {
+  // Support Firefox versions which prefix WebSocket
+  if (!window['WebSocket'] && window['MozWebSocket']) {
+    window['WebSocket'] = window['MozWebSocket']
+  }
+
+  if (window['WebSocket']) {
+    Pusher.Transport = window['WebSocket'];
+    Pusher.TransportType = 'native';
+  }
+
   var cdn = (document.location.protocol == 'http:') ? Pusher.cdn_http : Pusher.cdn_https;
   var root = cdn + Pusher.VERSION;
   var deps = [];
 
-  if (window['JSON'] === undefined) {
+  if (!window['JSON']) {
     deps.push(root + '/json2' + Pusher.dependency_suffix + '.js');
   }
-  if (window['WebSocket'] === undefined && window['MozWebSocket'] === undefined) {
+  if (!window['WebSocket']) {
     // We manually initialize web-socket-js to iron out cross browser issues
     window.WEB_SOCKET_DISABLE_AUTO_INITIALIZATION = true;
     deps.push(root + '/flashfallback' + Pusher.dependency_suffix + '.js');
   }
 
   var initialize = function() {
-    if (window['WebSocket'] === undefined && window['MozWebSocket'] === undefined) {
+    if (window['WebSocket']) {
+      // Initialize function in the case that we have native WebSocket support
       return function() {
-        // This runs after flashfallback.js has loaded
-        if (window['WebSocket'] !== undefined && window['MozWebSocket'] === undefined) {
+        Pusher.ready();
+      }
+    } else {
+      // Initialize function for fallback case
+      return function() {
+        if (window['WebSocket']) {
           // window['WebSocket'] is a flash emulation of WebSocket
           Pusher.Transport = window['WebSocket'];
           Pusher.TransportType = 'flash';
@@ -1228,25 +1255,10 @@ var _require = (function () {
           Pusher.ready();
         }
       }
-    } else {
-      return function() {
-        // This is because Mozilla have decided to
-        // prefix the WebSocket constructor with "Moz".
-        if (window['MozWebSocket'] !== undefined) {
-          Pusher.Transport = window['MozWebSocket'];
-        } else {
-          Pusher.Transport = window['WebSocket'];
-        }
-        // We have some form of a native websocket,
-        // even if the constructor is prefixed:
-        Pusher.TransportType = 'native';
-
-        // Initialise Pusher.
-        Pusher.ready();
-      }
     }
   }();
 
+  // Allows calling a function when the document body is available
   var ondocumentbody = function(callback) {
     var load_body = function() {
       document.body ? callback() : setTimeout(load_body, 0);

@@ -3,7 +3,7 @@
 
 Adds:
 - [pusher-gem v0.9.3](https://github.com/pusher/pusher-gem/tree/v0.9.3)
-- [pusher.js v1.12.1](https://github.com/pusher/pusher-js/tree/v1.12.1)
+- [pusher.js v1.12.2](https://github.com/pusher/pusher-js/tree/v1.12.2)
 - [backpusher.js](https://github.com/pusher/backpusher)
 
 This pulls in the *pusher-gem* as well as adding *pusher.js* and *backpusher.js* to the assets pipeline of your Rails 3.1+ app.
@@ -21,7 +21,7 @@ Licenses
 ========
 
     /*!
-     * Pusher JavaScript Library v1.12.1
+     * Pusher JavaScript Library v1.12.2
      * http://pusherapp.com/
      *
      * Copyright 2011, Pusher
