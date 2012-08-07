@@ -1,3 +1,11 @@
+v0.2.5
+======
+- Upgraded to pusher-gem 0.9.4
+
+v0.2.4
+======
+- Upgraded to pusher.js 1.12.2
+
 v0.2.3
 ======
 - Upgraded to pusher.js 1.12.1
