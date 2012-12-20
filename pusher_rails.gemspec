@@ -11,7 +11,7 @@ Gem::Specification.new do |s|
   s.description   = 'Adds pusher.js/backpusher.js to the asset pipeline and pusher-gem to to your app.'
   s.homepage      = 'https://github.com/dbgrandi/pusher_rails'
 
-  s.add_dependency "pusher", "~> 0.9.4"
+  s.add_dependency "pusher", "~> 0.11.1"
 
   s.files         = `git ls-files`.split("\n")
   s.require_paths = ["lib"]
