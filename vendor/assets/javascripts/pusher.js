@@ -1,5 +1,5 @@
 /*!
- * Pusher JavaScript Library v1.12.2
+ * Pusher JavaScript Library v1.12.7
  * http://pusherapp.com/
  *
  * Copyright 2011, Pusher
@@ -81,7 +81,7 @@
     },
 
     subscribeAll: function() {
-      var channel;
+      var channelName;
       for (channelName in this.channels.channels) {
         if (this.channels.channels.hasOwnProperty(channelName)) {
           this.subscribe(channelName);
@@ -123,7 +123,8 @@
     },
 
     checkAppKey: function() {
-      if(this.key === null || this.key === undefined) {
+      if (!this.key) {
+        // do not allow undefined, null or empty string
         Pusher.warn('Warning', 'You must pass your app key when you instantiate Pusher.');
       }
     }
@@ -183,11 +184,17 @@
   };
 
   // Pusher defaults
-  Pusher.VERSION = '1.12.2';
-
+  Pusher.VERSION = '1.12.7';
+  // WS connection parameters
   Pusher.host = 'ws.pusherapp.com';
   Pusher.ws_port = 80;
   Pusher.wss_port = 443;
+  // SockJS fallback parameters
+  Pusher.sockjs_host = 'sockjs.pusher.com';
+  Pusher.sockjs_http_port = 80
+  Pusher.sockjs_https_port = 443
+  Pusher.sockjs_path = "/pusher"
+  // Other settings
   Pusher.channel_auth_endpoint = '/pusher/auth';
   Pusher.cdn_http = 'http://js.pusher.com/'
   Pusher.cdn_https = 'https://d3dy5gmtp8yhk7.cloudfront.net/'
@@ -430,27 +437,25 @@ Example:
   };
 
 
-  // Amount to add to time between connection attemtpts per failed attempt.
-  var UNSUCCESSFUL_CONNECTION_ATTEMPT_ADDITIONAL_WAIT = 2000;
-  var UNSUCCESSFUL_OPEN_ATTEMPT_ADDITIONAL_TIMEOUT = 2000;
-  var UNSUCCESSFUL_CONNECTED_ATTEMPT_ADDITIONAL_TIMEOUT = 2000;
+  var OPEN_TIMEOUT_INCREMENT = 2000;
+  var CONNECTED_TIMEOUT_INCREMENT = 2000;
 
-  var MAX_CONNECTION_ATTEMPT_WAIT = 5 * UNSUCCESSFUL_CONNECTION_ATTEMPT_ADDITIONAL_WAIT;
-  var MAX_OPEN_ATTEMPT_TIMEOUT = 5 * UNSUCCESSFUL_OPEN_ATTEMPT_ADDITIONAL_TIMEOUT;
-  var MAX_CONNECTED_ATTEMPT_TIMEOUT = 5 * UNSUCCESSFUL_CONNECTED_ATTEMPT_ADDITIONAL_TIMEOUT;
+  var MAX_OPEN_TIMEOUT = 10000;
+  var MAX_CONNECTED_TIMEOUT = 10000;
 
   function resetConnectionParameters(connection) {
     connection.connectionWait = 0;
 
-    if (Pusher.TransportType === 'flash') {
-      // Flash needs a bit more time
-      connection.openTimeout = 5000;
-    } else {
-      connection.openTimeout = 2000;
+    if (Pusher.TransportType === 'native') {
+      connection.openTimeout = 4000;
+    } else if (Pusher.TransportType === 'flash') {
+      connection.openTimeout = 7000;
+    } else { // SockJS
+      connection.openTimeout = 6000;
     }
     connection.connectedTimeout = 2000;
     connection.connectionSecure = connection.compulsorySecure;
-    connection.connectionAttempts = 0;
+    connection.failedAttempts = 0;
   }
 
   function Connection(key, options) {
@@ -458,6 +463,7 @@ Example:
 
     Pusher.EventsDispatcher.call(this);
 
+    this.ping = true
     this.options = Pusher.Util.extend({encrypted: false}, options);
 
     this.netInfo = new Pusher.NetInfo();
@@ -497,22 +503,25 @@ Example:
       },
 
       waitingPre: function() {
-        if (self.connectionWait > 0) {
-          self.emit('connecting_in', self.connectionWait);
-        }
-
-        if (self.netInfo.isOnLine() && self.connectionAttempts <= 4) {
-          updateState('connecting');
-        } else {
-          updateState('unavailable');
-        }
-
-        // When in the unavailable state we attempt to connect, but don't
-        // broadcast that fact
         if (self.netInfo.isOnLine()) {
+          if (self.failedAttempts < 2) {
+            updateState('connecting');
+          } else {
+            updateState('unavailable');
+            // Delay 10s between connection attempts on entering unavailable
+            self.connectionWait = 10000;
+          }
+
+          if (self.connectionWait > 0) {
+            self.emit('connecting_in', connectionDelay());
+          }
+
           self._waitingTimer = setTimeout(function() {
+            // Even when unavailable we try connecting (not changing state)
             self._machine.transition('connecting');
           }, connectionDelay());
+        } else {
+          updateState('unavailable');
         }
       },
 
@@ -530,12 +539,27 @@ Example:
           return;
         }
 
-        var url = formatURL(self.key, self.connectionSecure);
-        Pusher.debug('Connecting', url);
-        self.socket = new Pusher.Transport(url);
-        // now that the socket connection attempt has been started,
-        // set up the callbacks fired by the socket for different outcomes
-        self.socket.onopen = ws_onopen;
+        var path = connectPath(self.key);
+        if (Pusher.TransportType === 'sockjs') {
+          Pusher.debug('Connecting to sockjs', Pusher.sockjs);
+          var url = buildSockJSURL(self.connectionSecure);
+
+          self.ping = false
+          self.socket = new SockJS(url);
+          self.socket.onopen = function() {
+            // SockJS does not yet support custom paths and query params
+            self.socket.send(JSON.stringify({path: path}));
+            self._machine.transition('open');
+          }
+        } else {
+          var url = connectBaseURL(self.connectionSecure) + path;
+          Pusher.debug('Connecting', url);
+          self.socket = new Pusher.Transport(url);
+          self.socket.onopen = function() {
+            self._machine.transition('open');
+          }
+        }
+
         self.socket.onclose = transitionToWaiting;
         self.socket.onerror = ws_onError;
 
@@ -639,44 +663,45 @@ Example:
       -----------------------------------------------*/
 
     function updateConnectionParameters() {
-      if (self.connectionWait < MAX_CONNECTION_ATTEMPT_WAIT) {
-        self.connectionWait += UNSUCCESSFUL_CONNECTION_ATTEMPT_ADDITIONAL_WAIT;
+      if (self.openTimeout < MAX_OPEN_TIMEOUT) {
+        self.openTimeout += OPEN_TIMEOUT_INCREMENT;
       }
 
-      if (self.openTimeout < MAX_OPEN_ATTEMPT_TIMEOUT) {
-        self.openTimeout += UNSUCCESSFUL_OPEN_ATTEMPT_ADDITIONAL_TIMEOUT;
+      if (self.connectedTimeout < MAX_CONNECTED_TIMEOUT) {
+        self.connectedTimeout += CONNECTED_TIMEOUT_INCREMENT;
       }
 
-      if (self.connectedTimeout < MAX_CONNECTED_ATTEMPT_TIMEOUT) {
-        self.connectedTimeout += UNSUCCESSFUL_CONNECTED_ATTEMPT_ADDITIONAL_TIMEOUT;
-      }
-
+      // Toggle between ws & wss
       if (self.compulsorySecure !== true) {
         self.connectionSecure = !self.connectionSecure;
       }
 
-      self.connectionAttempts++;
+      self.failedAttempts++;
     }
 
-    function formatURL(key, isSecure) {
-      var port = Pusher.ws_port;
-      var protocol = 'ws://';
+    function connectBaseURL(isSecure) {
+      // Always connect with SSL if the current page served over https
+      var ssl = (isSecure || document.location.protocol === 'https:');
+      var port = ssl ? Pusher.wss_port : Pusher.ws_port;
+      var scheme = ssl ? 'wss://' : 'ws://';
 
-      // Always connect with SSL if the current page has
-      // been loaded via HTTPS.
-      //
-      // FUTURE: Always connect using SSL.
-      //
-      if (isSecure || document.location.protocol === 'https:') {
-        port = Pusher.wss_port;
-        protocol = 'wss://';
-      }
+      return scheme + Pusher.host + ':' + port;
+    }
 
+    function connectPath(key) {
       var flash = (Pusher.TransportType === "flash") ? "true" : "false";
-
-      return protocol + Pusher.host + ':' + port + '/app/' + key + '?protocol=5&client=js'
+      var path = '/app/' + key + '?protocol=5&client=js'
         + '&version=' + Pusher.VERSION
         + '&flash=' + flash;
+      return path;
+    }
+
+    function buildSockJSURL(isSecure) {
+      var ssl = (isSecure || document.location.protocol === 'https:');
+      var port = ssl ? Pusher.sockjs_https_port : Pusher.sockjs_http_port;
+      var scheme = ssl ? 'https://' : 'http://';
+
+      return scheme + Pusher.sockjs_host + ':' + port + Pusher.sockjs_path;
     }
 
     // callback for close and retry.  Used on timeouts.
@@ -687,13 +712,15 @@ Example:
     function resetActivityCheck() {
       if (self._activityTimer) { clearTimeout(self._activityTimer); }
       // Send ping after inactivity
-      self._activityTimer = setTimeout(function() {
-        self.send_event('pusher:ping', {})
-        // Wait for pong response
+      if (self.ping) {
         self._activityTimer = setTimeout(function() {
-          self.socket.close();
-        }, (self.options.pong_timeout || Pusher.pong_timeout))
-      }, (self.options.activity_timeout || Pusher.activity_timeout))
+          self.send_event('pusher:ping', {})
+          // Wait for pong response
+          self._activityTimer = setTimeout(function() {
+            self.socket.close();
+          }, (self.options.pong_timeout || Pusher.pong_timeout))
+        }, (self.options.activity_timeout || Pusher.activity_timeout))
+      }
     }
 
     function stopActivityCheck() {
@@ -722,11 +749,6 @@ Example:
     /*-----------------------------------------------
       WebSocket Callbacks
       -----------------------------------------------*/
-
-    // no-op, as we only care when we get pusher:connection_established
-    function ws_onopen() {
-      self._machine.transition('open');
-    };
 
     function handleCloseCode(code, message) {
       // first inform the end-developer of this error
@@ -998,22 +1020,26 @@ Example:
 
   var Members = function(channel) {
     var self = this;
+    var channelData = null;
 
     var reset = function() {
-      this._members_map = {};
-      this.count = 0;
-      this.me = null;
+      self._members_map = {};
+      self.count = 0;
+      self.me = null;
+      channelData = null;
     };
-    reset.call(this);
+    reset();
+
+    var subscriptionSucceeded = function(subscriptionData) {
+      self._members_map = subscriptionData.presence.hash;
+      self.count = subscriptionData.presence.count;
+      self.me = self.get(channelData.user_id);
+      channel.emit('pusher:subscription_succeeded', self);
+    };
 
     channel.bind('pusher_internal:authorized', function(authorizedData) {
-      var channelData = JSON.parse(authorizedData.channel_data);
-      channel.bind("pusher_internal:subscription_succeeded", function(subscriptionData) {
-        self._members_map = subscriptionData.presence.hash;
-        self.count = subscriptionData.presence.count;
-        self.me = self.get(channelData.user_id);
-        channel.emit('pusher:subscription_succeeded', self);
-      });
+      channelData = JSON.parse(authorizedData.channel_data);
+      channel.bind("pusher_internal:subscription_succeeded", subscriptionSucceeded);
     });
 
     channel.bind('pusher_internal:member_added', function(data) {
@@ -1035,7 +1061,8 @@ Example:
     });
 
     channel.bind('pusher_internal:disconnected', function() {
-      reset.call(self);
+      reset();
+      channel.unbind("pusher_internal:subscription_succeeded", subscriptionSucceeded);
     });
   };
 
@@ -1070,6 +1097,7 @@ Example:
     return channel;
   };
 }).call(this);
+
 ;(function() {
   Pusher.Channel.Authorizer = function(channel, type, options) {
     this.channel = channel;
@@ -1224,9 +1252,22 @@ var _require = (function() {
     deps.push(root + '/json2' + Pusher.dependency_suffix + '.js');
   }
   if (!window['WebSocket']) {
-    // We manually initialize web-socket-js to iron out cross browser issues
-    window.WEB_SOCKET_DISABLE_AUTO_INITIALIZATION = true;
-    deps.push(root + '/flashfallback' + Pusher.dependency_suffix + '.js');
+    var flashSupported;
+    try {
+      flashSupported = Boolean(new ActiveXObject('ShockwaveFlash.ShockwaveFlash'));
+    } catch (e) {
+      flashSupported = navigator.mimeTypes["application/x-shockwave-flash"] !== undefined;
+    }
+
+    if (flashSupported) {
+      // Try to use web-socket-js (flash WebSocket emulation)
+      window.WEB_SOCKET_DISABLE_AUTO_INITIALIZATION = true;
+      window.WEB_SOCKET_SUPPRESS_CROSS_DOMAIN_SWF_ERROR = true;
+      deps.push(root + '/flashfallback' + Pusher.dependency_suffix + '.js');
+    } else {
+      // Use SockJS when Flash is not available
+      deps.push(root + '/sockjs' + Pusher.dependency_suffix + '.js');
+    }
   }
 
   var initialize = function() {
@@ -1249,9 +1290,9 @@ var _require = (function() {
           })
           WebSocket.__initialize();
         } else {
-          // Flash must not be installed
-          Pusher.Transport = null;
-          Pusher.TransportType = 'none';
+          // Flash fallback was not loaded, using SockJS
+          Pusher.Transport = window.SockJS;
+          Pusher.TransportType = 'sockjs';
           Pusher.ready();
         }
       }
@@ -1276,3 +1317,4 @@ var _require = (function() {
     initializeOnDocumentBody();
   }
 })();
+
