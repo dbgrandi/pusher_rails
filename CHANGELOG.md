@@ -1,3 +1,9 @@
+v1.0.1
+======
+- Upgraded to pusher.js v2.0.2
+- Added pusher.min.js v2.0.2
+- Updated readme
+
 v1.0.0
 ======
 - Upgraded to pusher.js 2.0

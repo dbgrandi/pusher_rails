@@ -2,8 +2,8 @@
 =====================
 
 Adds:
-- [pusher-gem v0.9.4](https://github.com/pusher/pusher-gem/tree/v0.9.4)
-- [pusher.js v1.12.2](https://github.com/pusher/pusher-js/tree/v1.12.2)
+- [pusher-gem v0.11.3](https://github.com/pusher/pusher-gem/)
+- [pusher.js v2.0.2](https://github.com/pusher/pusher-js/)
 - [backpusher.js](https://github.com/pusher/backpusher)
 
 This pulls in the *pusher-gem* as well as adding *pusher.js* and *backpusher.js* to the assets pipeline of your Rails 3.1+ app.
@@ -12,6 +12,9 @@ Add this to your app/assets/javascripts/application.js:
 
     // if you want to use pusher.js
     //= require pusher
+
+    // if you want to use pusher.min.js
+    //= require pusher.min
 
     // if you are using pusher.js + backbone.js
     //= require backpusher

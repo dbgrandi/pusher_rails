@@ -1,5 +1,5 @@
 /*!
- * Pusher JavaScript Library v2.0.0
+ * Pusher JavaScript Library v2.0.2
  * http://pusherapp.com/
  *
  * Copyright 2013, Pusher
@@ -500,7 +500,7 @@
 }).call(this);
 
 ;(function() {
-  Pusher.VERSION = '2.0.0';
+  Pusher.VERSION = '2.0.2';
   Pusher.PROTOCOL = 6;
 
   // WS connection parameters
@@ -1946,7 +1946,11 @@
     try {
       return !!(new ActiveXObject('ShockwaveFlash.ShockwaveFlash'));
     } catch (e) {
-      return navigator.mimeTypes["application/x-shockwave-flash"] !== undefined;
+      return Boolean(
+        navigator &&
+        navigator.mimeTypes &&
+        navigator.mimeTypes["application/x-shockwave-flash"] !== undefined
+      );
     }
   };
 
@@ -2191,8 +2195,8 @@
     return connection;
   };
 
-  prototype.isSupported = function() {
-    return this.manager.isAlive() && this.transport.isSupported();
+  prototype.isSupported = function(environment) {
+    return this.manager.isAlive() && this.transport.isSupported(environment);
   };
 
   Pusher.AssistantToTheTransportManager = AssistantToTheTransportManager;
@@ -2548,10 +2552,7 @@
 
   /** @private */
   prototype.handleCloseCode = function(code, message) {
-    this.emit(
-      'error', { type: 'PusherError', data: { code: code, message: message } }
-    );
-
+    var shouldReport = true;
     // See:
     // 1. https://developer.mozilla.org/en-US/docs/WebSockets/WebSockets_reference/CloseEvent
     // 2. http://pusher.com/docs/pusher_protocol
@@ -2561,6 +2562,9 @@
       // ignore 1007...3999
       // handle 1002 CLOSE_PROTOCOL_ERROR, 1003 CLOSE_UNSUPPORTED,
       //        1004 CLOSE_TOO_LARGE
+      if (code === 1000 || code === 1001) {
+        shouldReport = false;
+      }
       if (code >= 1002 && code <= 1004) {
         this.emit("backoff");
       }
@@ -2575,6 +2579,12 @@
     } else {
       // unknown error
       this.emit("refused");
+    }
+
+    if (shouldReport) {
+      this.emit(
+        'error', { type: 'PusherError', data: { code: code, message: message } }
+      );
     }
   };
 
@@ -2617,6 +2627,8 @@
     this.encrypted = !!options.encrypted;
     this.timeline = this.options.getTimeline();
 
+    this.connectionCallbacks = this.buildCallbacks();
+
     var self = this;
 
     Pusher.Network.bind("online", function() {
@@ -2638,6 +2650,8 @@
     };
     this.bind("connected", sendTimeline);
     setInterval(sendTimeline, 60000);
+
+    this.updateStrategy();
   }
   var prototype = ConnectionManager.prototype;
 
@@ -2656,13 +2670,7 @@
       return;
     }
 
-    var strategy = this.options.getStrategy({
-      key: this.key,
-      timeline: this.timeline,
-      encrypted: this.encrypted
-    });
-
-    if (!strategy.isSupported()) {
+    if (!this.strategy.isSupported()) {
       this.updateState("failed");
       return;
     }
@@ -2681,14 +2689,14 @@
     var self = this;
     var callback = function(error, transport) {
       if (error) {
-        self.runner = strategy.connect(0, callback);
+        self.runner = self.strategy.connect(0, callback);
       } else {
         // we don't support switching connections yet
         self.runner.abort();
         self.setConnection(self.wrapTransport(transport));
       }
     };
-    this.runner = strategy.connect(0, callback);
+    this.runner = this.strategy.connect(0, callback);
 
     this.setUnavailableTimer();
   };
@@ -2732,8 +2740,17 @@
     // we're in disconnected state, so closing will not cause reconnecting
     if (this.connection) {
       this.connection.close();
-      this.connection = null;
+      this.abandonConnection();
     }
+  };
+
+  /** @private */
+  prototype.updateStrategy = function() {
+    this.strategy = this.options.getStrategy({
+      key: this.key,
+      timeline: this.timeline,
+      encrypted: this.encrypted
+    });
   };
 
   /** @private */
@@ -2802,73 +2819,68 @@
   };
 
   /** @private */
-  prototype.setConnection = function(connection) {
-    this.connection = connection;
-
+  prototype.buildCallbacks = function() {
     var self = this;
-    var onConnected = function(id) {
-      self.clearUnavailableTimer();
-      self.socket_id = id;
-      self.updateState("connected");
-      self.resetActivityCheck();
-    };
-    var onMessage = function(message) {
-      // includes pong messages from server
-      self.resetActivityCheck();
-      self.emit('message', message);
-    };
-    var onPing = function() {
-      self.send_event('pusher:pong', {});
-    };
-    var onPingRequest = function() {
-      self.send_event('pusher:ping', {});
-    };
-    var onError = function(error) {
-      // just emit error to user - socket will already be closed by browser
-      self.emit("error", { type: "WebSocketError", error: error });
-    };
-    var onClosed = function() {
-      connection.unbind("connected", onConnected);
-      connection.unbind("message", onMessage);
-      connection.unbind("ping", onPing);
-      connection.unbind("ping_request", onPingRequest);
-      connection.unbind("error", onError);
-      connection.unbind("closed", onClosed);
-      self.connection = null;
-
-      if (self.shouldRetry()) {
+    return {
+      connected: function(id) {
+        self.clearUnavailableTimer();
+        self.socket_id = id;
+        self.updateState("connected");
+        self.resetActivityCheck();
+      },
+      message: function(message) {
+        // includes pong messages from server
+        self.resetActivityCheck();
+        self.emit('message', message);
+      },
+      ping: function() {
+        self.send_event('pusher:pong', {});
+      },
+      ping_request: function() {
+        self.send_event('pusher:ping', {});
+      },
+      error: function(error) {
+        // just emit error to user - socket will already be closed by browser
+        self.emit("error", { type: "WebSocketError", error: error });
+      },
+      closed: function() {
+        self.abandonConnection();
+        if (self.shouldRetry()) {
+          self.retryIn(1000);
+        }
+      },
+      ssl_only: function() {
+        self.encrypted = true;
+        self.updateStrategy();
+        self.retryIn(0);
+      },
+      refused: function() {
+        self.disconnect();
+      },
+      backoff: function() {
         self.retryIn(1000);
+      },
+      retry: function() {
+        self.retryIn(0);
       }
     };
+  };
 
-    // handling close conditions
-    var onSSLOnly = function() {
-      self.encrypted = true;
-      self.retryIn(0);
-    };
-    var onRefused = function() {
-      self.disconnect();
-    };
-    var onBackoff = function() {
-      self.retryIn(1000);
-    };
-    var onRetry = function() {
-      self.retryIn(0);
-    };
-
-    connection.bind("connected", onConnected);
-    connection.bind("message", onMessage);
-    connection.bind("ping", onPing);
-    connection.bind("ping_request", onPingRequest);
-    connection.bind("error", onError);
-    connection.bind("closed", onClosed);
-
-    connection.bind("ssl_only", onSSLOnly);
-    connection.bind("refused", onRefused);
-    connection.bind("backoff", onBackoff);
-    connection.bind("retry", onRetry);
-
+  /** @private */
+  prototype.setConnection = function(connection) {
+    this.connection = connection;
+    for (var event in this.connectionCallbacks) {
+      this.connection.bind(event, this.connectionCallbacks[event]);
+    }
     this.resetActivityCheck();
+  };
+
+  /** @private */
+  prototype.abandonConnection = function() {
+    for (var event in this.connectionCallbacks) {
+      this.connection.unbind(event, this.connectionCallbacks[event]);
+    }
+    this.connection = null;
   };
 
   /** @private */
