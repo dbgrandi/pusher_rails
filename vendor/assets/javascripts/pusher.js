@@ -1,5 +1,5 @@
 /*!
- * Pusher JavaScript Library v2.0.2
+ * Pusher JavaScript Library v2.1.2
  * http://pusherapp.com/
  *
  * Copyright 2013, Pusher
@@ -8,70 +8,75 @@
 
 ;(function() {
   function Pusher(app_key, options) {
+    checkAppKey(app_key);
+    options = options || {};
+
     var self = this;
 
-    this.options = options || {};
     this.key = app_key;
+    this.config = Pusher.Util.extend(
+      Pusher.getGlobalConfig(),
+      options.cluster ? Pusher.getClusterConfig(options.cluster) : {},
+      options
+    );
+
     this.channels = new Pusher.Channels();
     this.global_emitter = new Pusher.EventsDispatcher();
     this.sessionID = Math.floor(Math.random() * 1000000000);
 
-    checkAppKey(this.key);
+    this.timeline = new Pusher.Timeline(this.key, this.sessionID, {
+      features: Pusher.Util.getClientFeatures(),
+      params: this.config.timelineParams || {},
+      limit: 50,
+      level: Pusher.Timeline.INFO,
+      version: Pusher.VERSION
+    });
+    if (!this.config.disableStats) {
+      this.timelineSender = new Pusher.TimelineSender(this.timeline, {
+        host: this.config.statsHost,
+        path: "/timeline"
+      });
+    }
 
     var getStrategy = function(options) {
       return Pusher.StrategyBuilder.build(
-        Pusher.getDefaultStrategy(),
-        Pusher.Util.extend({}, self.options, options)
+        Pusher.getDefaultStrategy(self.config),
+        Pusher.Util.extend({}, self.config, options)
       );
-    };
-    var getTimeline = function() {
-      return new Pusher.Timeline(self.key, self.sessionID, {
-        features: Pusher.Util.getClientFeatures(),
-        params: self.options.timelineParams || {},
-        limit: 25,
-        level: Pusher.Timeline.INFO,
-        version: Pusher.VERSION
-      });
-    };
-    var getTimelineSender = function(timeline, options) {
-      if (self.options.disableStats) {
-        return null;
-      }
-      return new Pusher.TimelineSender(timeline, {
-        encrypted: self.isEncrypted() || !!options.encrypted,
-        host: Pusher.stats_host,
-        path: "/timeline"
-      });
     };
 
     this.connection = new Pusher.ConnectionManager(
       this.key,
       Pusher.Util.extend(
         { getStrategy: getStrategy,
-          getTimeline: getTimeline,
-          getTimelineSender: getTimelineSender,
-          activityTimeout: Pusher.activity_timeout,
-          pongTimeout: Pusher.pong_timeout,
-          unavailableTimeout: Pusher.unavailable_timeout
+          timeline: this.timeline,
+          activityTimeout: this.config.activity_timeout,
+          pongTimeout: this.config.pong_timeout,
+          unavailableTimeout: this.config.unavailable_timeout
         },
-        this.options,
+        this.config,
         { encrypted: this.isEncrypted() }
       )
     );
 
     this.connection.bind('connected', function() {
       self.subscribeAll();
+      if (self.timelineSender) {
+        self.timelineSender.send(self.connection.isEncrypted());
+      }
     });
     this.connection.bind('message', function(params) {
       var internal = (params.event.indexOf('pusher_internal:') === 0);
       if (params.channel) {
         var channel = self.channel(params.channel);
         if (channel) {
-          channel.emit(params.event, params.data);
+          channel.handleEvent(params.event, params.data);
         }
       }
       // Emit globaly [deprecated]
-      if (!internal) self.global_emitter.emit(params.event, params.data);
+      if (!internal) {
+        self.global_emitter.emit(params.event, params.data);
+      }
     });
     this.connection.bind('disconnected', function() {
       self.channels.disconnect();
@@ -99,13 +104,16 @@
   };
 
   Pusher.warn = function() {
-    if (window.console && window.console.warn) {
-      window.console.warn(Pusher.Util.stringify.apply(this, arguments));
-    } else {
-      if (!Pusher.log) {
-        return;
+    var message = Pusher.Util.stringify.apply(this, arguments);
+    if (window.console) {
+      if (window.console.warn) {
+        window.console.warn(message);
+      } else if (window.console.log) {
+        window.console.log(message);
       }
-      Pusher.log(Pusher.Util.stringify.apply(this, arguments));
+    }
+    if (Pusher.log) {
+      Pusher.log(message);
     }
   };
 
@@ -122,10 +130,25 @@
 
   prototype.connect = function() {
     this.connection.connect();
+
+    if (this.timelineSender) {
+      if (!this.timelineSenderTimer) {
+        var encrypted = this.connection.isEncrypted();
+        var timelineSender = this.timelineSender;
+        this.timelineSenderTimer = new Pusher.PeriodicTimer(60000, function() {
+          timelineSender.send(encrypted);
+        });
+      }
+    }
   };
 
   prototype.disconnect = function() {
     this.connection.disconnect();
+
+    if (this.timelineSenderTimer) {
+      this.timelineSenderTimer.ensureAborted();
+      this.timelineSenderTimer = null;
+    }
   };
 
   prototype.bind = function(event_name, callback) {
@@ -148,35 +171,17 @@
   };
 
   prototype.subscribe = function(channel_name) {
-    var self = this;
     var channel = this.channels.add(channel_name, this);
-
     if (this.connection.state === 'connected') {
-      channel.authorize(
-        this.connection.socket_id,
-        this.options,
-        function(err, data) {
-          if (err) {
-            channel.emit('pusher:subscription_error', data);
-          } else {
-            self.send_event('pusher:subscribe', {
-              channel: channel_name,
-              auth: data.auth,
-              channel_data: data.channel_data
-            });
-          }
-        }
-      );
+      channel.subscribe();
     }
     return channel;
   };
 
   prototype.unsubscribe = function(channel_name) {
-    this.channels.remove(channel_name);
+    var channel = this.channels.remove(channel_name);
     if (this.connection.state === 'connected') {
-      this.send_event('pusher:unsubscribe', {
-        channel: channel_name
-      });
+      channel.unsubscribe();
     }
   };
 
@@ -188,7 +193,7 @@
     if (Pusher.Util.getDocumentLocation().protocol === "https:") {
       return true;
     } else {
-      return !!this.options.encrypted;
+      return Boolean(this.config.encrypted);
     }
   };
 
@@ -485,7 +490,11 @@
     },
 
     getLocalStorage: function() {
-      return window.localStorage;
+      try {
+        return window.localStorage;
+      } catch (e) {
+        return undefined;
+      }
     },
 
     getClientFeatures: function() {
@@ -500,39 +509,40 @@
 }).call(this);
 
 ;(function() {
-  Pusher.VERSION = '2.0.2';
+  Pusher.VERSION = '2.1.2';
   Pusher.PROTOCOL = 6;
 
-  // WS connection parameters
+  // DEPRECATED: WS connection parameters
   Pusher.host = 'ws.pusherapp.com';
   Pusher.ws_port = 80;
   Pusher.wss_port = 443;
-  // SockJS fallback parameters
+  // DEPRECATED: SockJS fallback parameters
   Pusher.sockjs_host = 'sockjs.pusher.com';
   Pusher.sockjs_http_port = 80;
   Pusher.sockjs_https_port = 443;
   Pusher.sockjs_path = "/pusher";
-  // Stats
+  // DEPRECATED: Stats
   Pusher.stats_host = 'stats.pusher.com';
-  // Other settings
+  // DEPRECATED: Other settings
   Pusher.channel_auth_endpoint = '/pusher/auth';
-  Pusher.cdn_http = 'http://js.pusher.com/';
-  Pusher.cdn_https = 'https://d3dy5gmtp8yhk7.cloudfront.net/';
-  Pusher.dependency_suffix = '';
   Pusher.channel_auth_transport = 'ajax';
   Pusher.activity_timeout = 120000;
   Pusher.pong_timeout = 30000;
   Pusher.unavailable_timeout = 10000;
+  // CDN configuration
+  Pusher.cdn_http = 'http://js.pusher.com/';
+  Pusher.cdn_https = 'https://d3dy5gmtp8yhk7.cloudfront.net/';
+  Pusher.dependency_suffix = '';
 
-  Pusher.getDefaultStrategy = function() {
+  Pusher.getDefaultStrategy = function(config) {
     return [
       [":def", "ws_options", {
-        hostUnencrypted: Pusher.host + ":" + Pusher.ws_port,
-        hostEncrypted: Pusher.host + ":" + Pusher.wss_port
+        hostUnencrypted: config.wsHost + ":" + config.wsPort,
+        hostEncrypted: config.wsHost + ":" + config.wssPort
       }],
       [":def", "sockjs_options", {
-        hostUnencrypted: Pusher.sockjs_host + ":" + Pusher.sockjs_http_port,
-        hostEncrypted: Pusher.sockjs_host + ":" + Pusher.sockjs_https_port
+        hostUnencrypted: config.httpHost + ":" + config.httpPort,
+        hostEncrypted: config.httpHost + ":" + config.httpsPort
       }],
       [":def", "timeouts", {
         loop: true,
@@ -540,7 +550,12 @@
         timeoutLimit: 60000
       }],
 
-      [":def", "ws_manager", [":transport_manager", { lives: 2 }]],
+      [":def", "ws_manager", [":transport_manager", {
+        lives: 2,
+        minPingDelay: 10000,
+        maxPingDelay: config.activity_timeout
+      }]],
+
       [":def_transport", "ws", "ws", 3, ":ws_options", ":ws_manager"],
       [":def_transport", "flash", "flash", 2, ":ws_options", ":ws_manager"],
       [":def_transport", "sockjs", "sockjs", 1, ":sockjs_options"],
@@ -563,6 +578,34 @@
         ]
       ]
     ];
+  };
+}).call(this);
+
+;(function() {
+  Pusher.getGlobalConfig = function() {
+    return {
+      wsHost: Pusher.host,
+      wsPort: Pusher.ws_port,
+      wssPort: Pusher.wss_port,
+      httpHost: Pusher.sockjs_host,
+      httpPort: Pusher.sockjs_http_port,
+      httpsPort: Pusher.sockjs_https_port,
+      httpPath: Pusher.sockjs_path,
+      statsHost: Pusher.stats_host,
+      authEndpoint: Pusher.channel_auth_endpoint,
+      authTransport: Pusher.channel_auth_transport,
+      // TODO make this consistent with other options in next major version
+      activity_timeout: Pusher.activity_timeout,
+      pong_timeout: Pusher.pong_timeout,
+      unavailable_timeout: Pusher.unavailable_timeout
+    };
+  };
+
+  Pusher.getClusterConfig = function(clusterName) {
+    return {
+      wsHost: "ws-" + clusterName + ".pusher.com",
+      httpHost: "sockjs-" + clusterName + ".pusher.com"
+    };
   };
 }).call(this);
 
@@ -651,9 +694,11 @@
   CallbackRegistry.prototype.remove = function(eventName, callback) {
     if(this.get(eventName)) {
       var index = Pusher.Util.arrayIndexOf(this.get(eventName), callback);
-      var callbacksCopy = this._callbacks[this._prefix(eventName)].slice(0);
-      callbacksCopy.splice(index, 1);
-      this._callbacks[this._prefix(eventName)] = callbacksCopy;
+      if (index !== -1){
+        var callbacksCopy = this._callbacks[this._prefix(eventName)].slice(0);
+        callbacksCopy.splice(index, 1);
+        this._callbacks[this._prefix(eventName)] = callbacksCopy;
+      }
     }
   };
 
@@ -692,24 +737,22 @@
 
     if (this.loaded[name]) {
       callback();
-      return;
-    }
+    } else if (this.loading[name] && this.loading[name].length > 0) {
+      this.loading[name].push(callback);
+    } else {
+      this.loading[name] = [callback];
 
-    if (!this.loading[name]) {
-      this.loading[name] = [];
-    }
-    this.loading[name].push(callback);
-    if (this.loading[name].length > 1) {
-      return;
-    }
+      require(this.getPath(name), function() {
+        self.loaded[name] = true;
 
-    require(this.getPath(name), function() {
-      for (var i = 0; i < self.loading[name].length; i++) {
-        self.loading[name][i]();
-      }
-      delete self.loading[name];
-      self.loaded[name] = true;
-    });
+        if (self.loading[name]) {
+          for (var i = 0; i < self.loading[name].length; i++) {
+            self.loading[name][i]();
+          }
+          delete self.loading[name];
+        }
+      });
+    }
   };
 
   /** Returns a root URL for pusher-js CDN.
@@ -843,6 +886,42 @@
   };
 
   Pusher.Timer = Timer;
+}).call(this);
+
+;(function() {
+  /** Cross-browser compatible periodic timer abstraction.
+   *
+   * @param {Number} interval
+   * @param {Function} callback
+   */
+  function PeriodicTimer(interval, callback) {
+    var self = this;
+
+    this.interval = setInterval(function() {
+      if (self.interval !== null) {
+        callback();
+      }
+    }, interval);
+  }
+  var prototype = PeriodicTimer.prototype;
+
+  /** Returns whether the timer is still running.
+   *
+   * @return {Boolean}
+   */
+  prototype.isRunning = function() {
+    return this.interval !== null;
+  };
+
+  /** Aborts a timer when it's running. */
+  prototype.ensureAborted = function() {
+    if (this.interval) {
+      clearInterval(this.interval);
+      this.interval = null;
+    }
+  };
+
+  Pusher.PeriodicTimer = PeriodicTimer;
 }).call(this);
 
 (function() {
@@ -1109,7 +1188,9 @@
       if (!error) {
         self.sent++;
       }
-      callback(error, result);
+      if (callback) {
+        callback(error, result);
+      }
     });
 
     return true;
@@ -1130,26 +1211,30 @@
   }
   var prototype = TimelineSender.prototype;
 
-  prototype.send = function(callback) {
+  prototype.send = function(encrypted, callback) {
     if (this.timeline.isEmpty()) {
       return;
     }
 
-    var options = this.options;
-    var scheme = "http" + (this.isEncrypted() ? "s" : "") + "://";
+    var self = this;
+    var scheme = "http" + (encrypted ? "s" : "") + "://";
 
     var sendJSONP = function(data, callback) {
-      return Pusher.JSONPRequest.send({
+      var params = {
         data: data,
-        url: scheme + options.host + options.path,
+        url: scheme + (self.host || self.options.host) + self.options.path,
         receiver: Pusher.JSONP
-      }, callback);
+      };
+      return Pusher.JSONPRequest.send(params, function(error, result) {
+        if (result.host) {
+          self.host = result.host;
+        }
+        if (callback) {
+          callback(error, result);
+        }
+      });
     };
-    this.timeline.send(sendJSONP, callback);
-  };
-
-  prototype.isEncrypted = function() {
-    return !!this.options.encrypted;
+    self.timeline.send(sendJSONP, callback);
   };
 
   Pusher.TimelineSender = TimelineSender;
@@ -1171,7 +1256,7 @@
 
   prototype.connect = function(minPriority, callback) {
     return connect(this.strategies, minPriority, function(i, runners) {
-      return function(error, connection) {
+      return function(error, handshake) {
         runners[i].error = error;
         if (error) {
           if (allRunnersFailed(runners)) {
@@ -1180,9 +1265,9 @@
           return;
         }
         Pusher.Util.apply(runners, function(runner) {
-          runner.forceMinPriority(connection.priority);
+          runner.forceMinPriority(handshake.transport.priority);
         });
-        callback(null, connection);
+        callback(null, handshake);
       };
     });
   };
@@ -1267,7 +1352,7 @@
     var startTimestamp = Pusher.Util.now();
     var runner = strategies.pop().connect(
       minPriority,
-      function cb(error, connection) {
+      function cb(error, handshake) {
         if (error) {
           flushTransportInfo();
           if (strategies.length > 0) {
@@ -1278,8 +1363,8 @@
           }
         } else {
           var latency = Pusher.Util.now() - startTimestamp;
-          storeTransportInfo(connection.name, latency);
-          callback(null, connection);
+          storeTransportInfo(handshake.transport.name, latency);
+          callback(null, handshake);
         }
       }
     );
@@ -1311,18 +1396,26 @@
   function storeTransportInfo(transport, latency) {
     var storage = Pusher.Util.getLocalStorage();
     if (storage) {
-      storage.pusherTransport = JSON.stringify({
-        timestamp: Pusher.Util.now(),
-        transport: transport,
-        latency: latency
-      });
+      try {
+        storage.pusherTransport = JSON.stringify({
+          timestamp: Pusher.Util.now(),
+          transport: transport,
+          latency: latency
+        });
+      } catch(e) {
+        // catch over quota exceptions raised by localStorage
+      }
     }
   }
 
   function flushTransportInfo() {
     var storage = Pusher.Util.getLocalStorage();
-    if (storage) {
-      delete storage.pusherTransport;
+    if (storage && storage.pusherTransport) {
+      try {
+        delete storage.pusherTransport;
+      } catch(e) {
+        storage.pusherTransport = undefined;
+      }
     }
   }
 
@@ -1391,11 +1484,11 @@
   prototype.connect = function(minPriority, callback) {
     var runner = this.strategy.connect(
       minPriority,
-      function(error, connection) {
-        if (connection) {
+      function(error, handshake) {
+        if (handshake) {
           runner.abort();
         }
-        callback(error, connection);
+        callback(error, handshake);
       }
     );
     return runner;
@@ -1463,9 +1556,9 @@
     var timeout = this.timeout;
     var runner = null;
 
-    var tryNextStrategy = function(error, connection) {
-      if (connection) {
-        callback(null, connection);
+    var tryNextStrategy = function(error, handshake) {
+      if (handshake) {
+        callback(null, handshake);
       } else {
         current = current + 1;
         if (self.loop) {
@@ -1516,7 +1609,7 @@
     var timer = null;
     var runner = null;
 
-    runner = strategy.connect(minPriority, function(error, connection) {
+    runner = strategy.connect(minPriority, function(error, handshake) {
       if (error && timer && timer.isRunning() && !options.failFast) {
         // advance to the next strategy after the timeout
         return;
@@ -1524,7 +1617,7 @@
       if (timer) {
         timer.ensureAborted();
       }
-      callback(error, connection);
+      callback(error, handshake);
     });
 
     if (options.timeout > 0) {
@@ -1589,17 +1682,23 @@
     }
 
     var self = this;
-    var connection = this.transport.createConnection(
+    var connected = false;
+
+    var transport = this.transport.createConnection(
       this.name, this.priority, this.options.key, this.options
     );
+    var handshake = null;
 
     var onInitialized = function() {
-      connection.unbind("initialized", onInitialized);
-      connection.connect();
+      transport.unbind("initialized", onInitialized);
+      transport.connect();
     };
     var onOpen = function() {
-      unbindListeners();
-      callback(null, connection);
+      handshake = new Pusher.Handshake(transport, function(result) {
+        connected = true;
+        unbindListeners();
+        callback(null, result);
+      });
     };
     var onError = function(error) {
       unbindListeners();
@@ -1607,39 +1706,46 @@
     };
     var onClosed = function() {
       unbindListeners();
-      callback(new Pusher.Errors.TransportClosed(this.transport));
+      callback(new Pusher.Errors.TransportClosed(transport));
     };
 
     var unbindListeners = function() {
-      connection.unbind("initialized", onInitialized);
-      connection.unbind("open", onOpen);
-      connection.unbind("error", onError);
-      connection.unbind("closed", onClosed);
+      transport.unbind("initialized", onInitialized);
+      transport.unbind("open", onOpen);
+      transport.unbind("error", onError);
+      transport.unbind("closed", onClosed);
     };
 
-    connection.bind("initialized", onInitialized);
-    connection.bind("open", onOpen);
-    connection.bind("error", onError);
-    connection.bind("closed", onClosed);
+    transport.bind("initialized", onInitialized);
+    transport.bind("open", onOpen);
+    transport.bind("error", onError);
+    transport.bind("closed", onClosed);
 
     // connect will be called automatically after initialization
-    connection.initialize();
+    transport.initialize();
 
     return {
       abort: function() {
-        if (connection.state === "open") {
+        if (connected) {
           return;
         }
         unbindListeners();
-        connection.close();
+        if (handshake) {
+          handshake.close();
+        } else {
+          transport.close();
+        }
       },
       forceMinPriority: function(p) {
-        if (connection.state === "open") {
+        if (connected) {
           return;
         }
         if (self.priority < p) {
-          // TODO close connection in a nicer way
-          connection.close();
+          if (handshake) {
+            handshake.close();
+          } else {
+            transport.close();
+          }
         }
       }
     };
@@ -1752,7 +1858,17 @@
       return false;
     }
 
-    this.socket = this.createSocket(url);
+    try {
+      this.socket = this.createSocket(url);
+    } catch (e) {
+      var self = this;
+      new Pusher.Timer(0, function() {
+        self.onError(e);
+        self.changeState("closed");
+      });
+      return false;
+    }
+
     this.bindListeners();
 
     Pusher.debug("Connecting", { transport: this.name, url: url });
@@ -1790,7 +1906,9 @@
       // Workaround for MobileSafari bug (see https://gist.github.com/2052006)
       var self = this;
       setTimeout(function() {
-        self.socket.send(data);
+        if (self.socket) {
+          self.socket.send(data);
+        }
       }, 0);
       return true;
     } else {
@@ -1811,14 +1929,20 @@
   /** @protected */
   prototype.onError = function(error) {
     this.emit("error", { type: 'WebSocketError', error: error });
-    this.timeline.error(this.buildTimelineMessage({
-      error: getErrorDetails(error)
-    }));
+    this.timeline.error(this.buildTimelineMessage({}));
   };
 
   /** @protected */
   prototype.onClose = function(closeEvent) {
-    this.changeState("closed", closeEvent);
+    if (closeEvent) {
+      this.changeState("closed", {
+        code: closeEvent.code,
+        reason: closeEvent.reason,
+        wasClean: closeEvent.wasClean
+      });
+    } else {
+      this.changeState("closed");
+    }
     this.socket = undefined;
   };
 
@@ -1890,22 +2014,6 @@
     return Pusher.Util.extend({ cid: this.id }, message);
   };
 
-  function getErrorDetails(error) {
-    if (typeof error === "string") {
-      return error;
-    }
-    if (typeof error === "object") {
-      return Pusher.Util.mapObject(error, function(value) {
-        var valueType = typeof value;
-        if (valueType === "object" || valueType == "function") {
-          return valueType;
-        }
-        return value;
-      });
-    }
-    return typeof error;
-  }
-
   Pusher.AbstractTransport = AbstractTransport;
 }).call(this);
 
@@ -1944,7 +2052,7 @@
       return false;
     }
     try {
-      return !!(new ActiveXObject('ShockwaveFlash.ShockwaveFlash'));
+      return Boolean(new ActiveXObject('ShockwaveFlash.ShockwaveFlash'));
     } catch (e) {
       return Boolean(
         navigator &&
@@ -2001,6 +2109,7 @@
    */
   function SockJSTransport(name, priority, key, options) {
     Pusher.AbstractTransport.call(this, name, priority, key, options);
+    this.options.ignoreNullOrigin = options.ignoreNullOrigin;
   }
   var prototype = SockJSTransport.prototype;
   Pusher.Util.extend(prototype, Pusher.AbstractTransport.prototype);
@@ -2051,12 +2160,11 @@
 
   /** @protected */
   prototype.createSocket = function(url) {
-    // exclude iframe transports until we link to correct SockJS version
-    // inside the iframe
     return new SockJS(url, null, {
       js_path: Pusher.Dependencies.getPath("sockjs", {
         encrypted: this.options.encrypted
-      })
+      }),
+      ignore_null_origin: this.options.ignoreNullOrigin
     });
   };
 
@@ -2067,7 +2175,7 @@
 
   /** @protected */
   prototype.getPath = function() {
-    return "/pusher";
+    return this.options.httpPath || "/pusher";
   };
 
   /** @protected */
@@ -2142,8 +2250,8 @@
   function AssistantToTheTransportManager(manager, transport, options) {
     this.manager = manager;
     this.transport = transport;
-    this.minPingDelay = options.minPingDelay || 10000;
-    this.maxPingDelay = options.maxPingDelay || Pusher.activity_timeout;
+    this.minPingDelay = options.minPingDelay;
+    this.maxPingDelay = options.maxPingDelay;
     this.pingDelay = null;
   }
   var prototype = AssistantToTheTransportManager.prototype;
@@ -2178,11 +2286,11 @@
         pingTimer = null;
       }
 
-      if (closeEvent.wasClean) {
-        return;
-      }
-
-      if (openTimestamp) {
+      if (closeEvent.code === 1002 || closeEvent.code === 1003) {
+        // we don't want to use transports not obeying the protocol
+        self.manager.reportDeath();
+      } else if (!closeEvent.wasClean && openTimestamp) {
+        // report deaths only for short-living transport
         var lifespan = Pusher.Util.now() - openTimestamp;
         if (lifespan < 2 * self.maxPingDelay) {
           self.manager.reportDeath();
@@ -2273,7 +2381,8 @@
         key: context.key,
         encrypted: context.encrypted,
         timeline: context.timeline,
-        disableFlash: context.disableFlash
+        disableFlash: context.disableFlash,
+        ignoreNullOrigin: context.ignoreNullOrigin
       }, options);
       if (manager) {
         transportClass = manager.getAssistant(transportClass);
@@ -2395,29 +2504,165 @@
 
 ;(function() {
   /**
+   * Provides functions for handling Pusher protocol-specific messages.
+   */
+  Protocol = {};
+
+  /**
+   * Decodes a message in a Pusher format.
+   *
+   * Throws errors when messages are not parse'able.
+   *
+   * @param  {Object} message
+   * @return {Object}
+   */
+  Protocol.decodeMessage = function(message) {
+    try {
+      var params = JSON.parse(message.data);
+      if (typeof params.data === 'string') {
+        try {
+          params.data = JSON.parse(params.data);
+        } catch (e) {
+          if (!(e instanceof SyntaxError)) {
+            // TODO looks like unreachable code
+            // https://developer.mozilla.org/en-US/docs/JavaScript/Reference/Global_Objects/JSON/parse
+            throw e;
+          }
+        }
+      }
+      return params;
+    } catch (e) {
+      throw { type: 'MessageParseError', error: e, data: message.data};
+    }
+  };
+
+  /**
+   * Encodes a message to be sent.
+   *
+   * @param  {Object} message
+   * @return {String}
+   */
+  Protocol.encodeMessage = function(message) {
+    return JSON.stringify(message);
+  };
+
+  /** Processes a handshake message and returns appropriate actions.
+   *
+   * Returns an object with an 'action' and other action-specific properties.
+   *
+   * There are three outcomes when calling this function. First is a successful
+   * connection attempt, when pusher:connection_established is received, which
+   * results in a 'connected' action with an 'id' property. When passed a
+   * pusher:error event, it returns a result with action appropriate to the
+   * close code and an error. Otherwise, it raises an exception.
+   *
+   * @param {String} message
+   * @result Object
+   */
+  Protocol.processHandshake = function(message) {
+    message = this.decodeMessage(message);
+
+    if (message.event === "pusher:connection_established") {
+      return { action: "connected", id: message.data.socket_id };
+    } else if (message.event === "pusher:error") {
+      // From protocol 6 close codes are sent only once, so this only
+      // happens when connection does not support close codes
+      return {
+        action: this.getCloseAction(message.data),
+        error: this.getCloseError(message.data)
+      };
+    } else {
+      throw "Invalid handshake";
+    }
+  };
+
+  /**
+   * Dispatches the close event and returns an appropriate action name.
+   *
+   * See:
+   * 1. https://developer.mozilla.org/en-US/docs/WebSockets/WebSockets_reference/CloseEvent
+   * 2. http://pusher.com/docs/pusher_protocol
+   *
+   * @param  {CloseEvent} closeEvent
+   * @return {String} close action name
+   */
+  Protocol.getCloseAction = function(closeEvent) {
+    if (closeEvent.code < 4000) {
+      // ignore 1000 CLOSE_NORMAL, 1001 CLOSE_GOING_AWAY,
+      //        1005 CLOSE_NO_STATUS, 1006 CLOSE_ABNORMAL
+      // ignore 1007...3999
+      // handle 1002 CLOSE_PROTOCOL_ERROR, 1003 CLOSE_UNSUPPORTED,
+      //        1004 CLOSE_TOO_LARGE
+      if (closeEvent.code >= 1002 && closeEvent.code <= 1004) {
+        return "backoff";
+      } else {
+        return null;
+      }
+    } else if (closeEvent.code === 4000) {
+      return "ssl_only";
+    } else if (closeEvent.code < 4100) {
+      return "refused";
+    } else if (closeEvent.code < 4200) {
+      return "backoff";
+    } else if (closeEvent.code < 4300) {
+      return "retry";
+    } else {
+      // unknown error
+      return "refused";
+    }
+  };
+
+  /**
+   * Returns an error or null basing on the close event.
+   *
+   * Null is returned when connection was closed cleanly. Otherwise, an object
+   * with error details is returned.
+   *
+   * @param  {CloseEvent} closeEvent
+   * @return {Object} error object
+   */
+  Protocol.getCloseError = function(closeEvent) {
+    if (closeEvent.code !== 1000 && closeEvent.code !== 1001) {
+      return {
+        type: 'PusherError',
+        data: {
+          code: closeEvent.code,
+          message: closeEvent.reason || closeEvent.message
+        }
+      };
+    } else {
+      return null;
+    }
+  };
+
+  Pusher.Protocol = Protocol;
+}).call(this);
+
+;(function() {
+  /**
    * Provides Pusher protocol interface for transports.
    *
    * Emits following events:
-   * - connected - after establishing connection and receiving a socket id
    * - message - on received messages
    * - ping - on ping requests
    * - pong - on pong responses
    * - error - when the transport emits an error
    * - closed - after closing the transport
-   * - ssl_only - after trying to connect without ssl to a ssl-only app
-   * - retry - when closed connection should be retried immediately
-   * - backoff - when closed connection should be retried with a delay
-   * - refused - when closed connection should not be retried
    *
+   * It also emits more events when connection closes with a code.
+   * See Protocol.getCloseAction to get more details.
+   *
+   * @param {Number} id
    * @param {AbstractTransport} transport
    */
-  function ProtocolWrapper(transport) {
+  function Connection(id, transport) {
     Pusher.EventsDispatcher.call(this);
+
+    this.id = id;
     this.transport = transport;
     this.bindListeners();
   }
-  var prototype = ProtocolWrapper.prototype;
-
+  var prototype = Connection.prototype;
   Pusher.Util.extend(prototype, Pusher.EventsDispatcher.prototype);
 
   /** Returns whether used transport handles ping/pong by itself
@@ -2444,19 +2689,15 @@
    * @returns {Boolean} whether message was sent or not
    */
   prototype.send_event = function(name, data, channel) {
-    var payload = {
-      event: name,
-      data: data
-    };
+    var message = { event: name, data: data };
     if (channel) {
-      payload.channel = channel;
+      message.channel = channel;
     }
-
-    Pusher.debug('Event sent', payload);
-    return this.send(JSON.stringify(payload));
+    Pusher.debug('Event sent', message);
+    return this.send(Pusher.Protocol.encodeMessage(message));
   };
 
-  /** Closes the transport.  */
+  /** Closes the connection. */
   prototype.close = function() {
     this.transport.close();
   };
@@ -2465,26 +2706,17 @@
   prototype.bindListeners = function() {
     var self = this;
 
-    var onMessageOpen = function(message) {
-      message = self.parseMessage(message);
-
-      if (message !== undefined) {
-        if (message.event === 'pusher:connection_established') {
-          self.id = message.data.socket_id;
-          self.transport.unbind("message", onMessageOpen);
-          self.transport.bind("message", onMessageConnected);
-          self.transport.bind("ping_request", onPingRequest);
-          self.emit("connected", self.id);
-        } else if (message.event === "pusher:error") {
-          // From protocol 6 close codes are sent only once, so this only
-          // happens when connection does not support close codes
-          self.handleCloseCode(message.data.code, message.data.message);
-          self.transport.close();
-        }
+    var onMessage = function(m) {
+      var message;
+      try {
+        message = Pusher.Protocol.decodeMessage(m);
+      } catch(e) {
+        self.emit('error', {
+          type: 'MessageParseError',
+          error: e,
+          data: m.data
+        });
       }
-    };
-    var onMessageConnected = function(message) {
-      message = self.parseMessage(message);
 
       if (message !== undefined) {
         Pusher.debug('Event recd', message);
@@ -2509,86 +2741,123 @@
     var onError = function(error) {
       self.emit("error", { type: "WebSocketError", error: error });
     };
-    var onClosed = function(error) {
-      if (error && error.code) {
-        self.handleCloseCode(error.code, error.reason);
+    var onClosed = function(closeEvent) {
+      unbindListeners();
+
+      if (closeEvent && closeEvent.code) {
+        self.handleCloseEvent(closeEvent);
       }
-      self.transport.unbind("message", onMessageOpen);
-      self.transport.unbind("message", onMessageConnected);
-      self.transport.unbind("ping_request", onPingRequest);
-      self.transport.unbind("error", onError);
-      self.transport.unbind("closed", onClosed);
+
       self.transport = null;
       self.emit("closed");
     };
 
-    this.transport.bind("message", onMessageOpen);
-    this.transport.bind("error", onError);
-    this.transport.bind("closed", onClosed);
+    var unbindListeners = function() {
+      self.transport.unbind("closed", onClosed);
+      self.transport.unbind("error", onError);
+      self.transport.unbind("ping_request", onPingRequest);
+      self.transport.unbind("message", onMessage);
+    };
+
+    self.transport.bind("message", onMessage);
+    self.transport.bind("ping_request", onPingRequest);
+    self.transport.bind("error", onError);
+    self.transport.bind("closed", onClosed);
   };
 
   /** @private */
-  prototype.parseMessage = function(message) {
-    try {
-      var params = JSON.parse(message.data);
+  prototype.handleCloseEvent = function(closeEvent) {
+    var action = Pusher.Protocol.getCloseAction(closeEvent);
+    var error = Pusher.Protocol.getCloseError(closeEvent);
+    if (error) {
+      this.emit('error', error);
+    }
+    if (action) {
+      this.emit(action);
+    }
+  };
 
-      if (typeof params.data === 'string') {
-        try {
-          params.data = JSON.parse(params.data);
-        } catch (e) {
-          if (!(e instanceof SyntaxError)) {
-            throw e;
-          }
+  Pusher.Connection = Connection;
+}).call(this);
+
+;(function() {
+  /**
+   * Handles Pusher protocol handshakes for transports.
+   *
+   * Calls back with a result object after handshake is completed. Results
+   * always have two fields:
+   * - action - string describing action to be taken after the handshake
+   * - transport - the transport object passed to the constructor
+   *
+   * Different actions can set different additional properties on the result.
+   * In the case of 'connected' action, there will be a 'connection' property
+   * containing a Connection object for the transport. Other actions should
+   * carry an 'error' property.
+   *
+   * @param {AbstractTransport} transport
+   * @param {Function} callback
+   */
+  function Handshake(transport, callback) {
+    this.transport = transport;
+    this.callback = callback;
+    this.bindListeners();
+  }
+  var prototype = Handshake.prototype;
+
+  prototype.close = function() {
+    this.unbindListeners();
+    this.transport.close();
+  };
+
+  /** @private */
+  prototype.bindListeners = function() {
+    var self = this;
+
+    self.onMessage = function(m) {
+      self.unbindListeners();
+
+      try {
+        var result = Pusher.Protocol.processHandshake(m);
+        if (result.action === "connected") {
+          self.finish("connected", {
+            connection: new Pusher.Connection(result.id, self.transport)
+          });
+        } else {
+          self.finish(result.action, { error: result.error });
+          self.transport.close();
         }
+      } catch (e) {
+        self.finish("error", { error: e });
+        self.transport.close();
       }
+    };
 
-      return params;
-    } catch (e) {
-      this.emit(
-        'error', { type: 'MessageParseError', error: e, data: message.data}
-      );
-    }
+    self.onClosed = function(closeEvent) {
+      self.unbindListeners();
+
+      var action = Pusher.Protocol.getCloseAction(closeEvent) || "backoff";
+      var error = Pusher.Protocol.getCloseError(closeEvent);
+      self.finish(action, { error: error });
+    };
+
+    self.transport.bind("message", self.onMessage);
+    self.transport.bind("closed", self.onClosed);
   };
 
   /** @private */
-  prototype.handleCloseCode = function(code, message) {
-    var shouldReport = true;
-    // See:
-    // 1. https://developer.mozilla.org/en-US/docs/WebSockets/WebSockets_reference/CloseEvent
-    // 2. http://pusher.com/docs/pusher_protocol
-    if (code < 4000) {
-      // ignore 1000 CLOSE_NORMAL, 1001 CLOSE_GOING_AWAY,
-      //        1005 CLOSE_NO_STATUS, 1006 CLOSE_ABNORMAL
-      // ignore 1007...3999
-      // handle 1002 CLOSE_PROTOCOL_ERROR, 1003 CLOSE_UNSUPPORTED,
-      //        1004 CLOSE_TOO_LARGE
-      if (code === 1000 || code === 1001) {
-        shouldReport = false;
-      }
-      if (code >= 1002 && code <= 1004) {
-        this.emit("backoff");
-      }
-    } else if (code === 4000) {
-      this.emit("ssl_only");
-    } else if (code < 4100) {
-      this.emit("refused");
-    } else if (code < 4200) {
-      this.emit("backoff");
-    } else if (code < 4300) {
-      this.emit("retry");
-    } else {
-      // unknown error
-      this.emit("refused");
-    }
-
-    if (shouldReport) {
-      this.emit(
-        'error', { type: 'PusherError', data: { code: code, message: message } }
-      );
-    }
+  prototype.unbindListeners = function() {
+    this.transport.unbind("message", this.onMessage);
+    this.transport.unbind("closed", this.onClosed);
   };
 
-  Pusher.ProtocolWrapper = ProtocolWrapper;
+  /** @private */
+  prototype.finish = function(action, params) {
+    this.callback(
+      Pusher.Util.extend({ transport: this.transport, action: action }, params)
+    );
+  };
+
+  Pusher.Handshake = Handshake;
 }).call(this);
 
 ;(function() {
@@ -2625,31 +2894,27 @@
     this.state = "initialized";
     this.connection = null;
     this.encrypted = !!options.encrypted;
-    this.timeline = this.options.getTimeline();
+    this.timeline = this.options.timeline;
 
-    this.connectionCallbacks = this.buildCallbacks();
+    this.connectionCallbacks = this.buildConnectionCallbacks();
+    this.errorCallbacks = this.buildErrorCallbacks();
+    this.handshakeCallbacks = this.buildHandshakeCallbacks(this.errorCallbacks);
 
     var self = this;
 
     Pusher.Network.bind("online", function() {
+      self.timeline.info({ netinfo: "online" });
       if (self.state === "unavailable") {
         self.connect();
       }
     });
     Pusher.Network.bind("offline", function() {
+      self.timeline.info({ netinfo: "offline" });
       if (self.shouldRetry()) {
         self.disconnect();
         self.updateState("unavailable");
       }
     });
-
-    var sendTimeline = function() {
-      if (self.timelineSender) {
-        self.timelineSender.send(function() {});
-      }
-    };
-    this.bind("connected", sendTimeline);
-    setInterval(sendTimeline, 60000);
 
     this.updateStrategy();
   }
@@ -2663,42 +2928,42 @@
    * to find events emitted on connection attempts.
    */
   prototype.connect = function() {
-    if (this.connection) {
+    var self = this;
+
+    if (self.connection) {
       return;
     }
-    if (this.state === "connecting") {
+    if (self.state === "connecting") {
       return;
     }
 
-    if (!this.strategy.isSupported()) {
-      this.updateState("failed");
+    if (!self.strategy.isSupported()) {
+      self.updateState("failed");
       return;
     }
     if (Pusher.Network.isOnline() === false) {
-      this.updateState("unavailable");
+      self.updateState("unavailable");
       return;
     }
 
-    this.updateState("connecting");
-    this.timelineSender = this.options.getTimelineSender(
-      this.timeline,
-      { encrypted: this.encrypted },
-      this
-    );
+    self.updateState("connecting");
 
-    var self = this;
-    var callback = function(error, transport) {
+    var callback = function(error, handshake) {
       if (error) {
         self.runner = self.strategy.connect(0, callback);
       } else {
-        // we don't support switching connections yet
-        self.runner.abort();
-        self.setConnection(self.wrapTransport(transport));
+        if (handshake.action === "error") {
+          self.timeline.error({ handshakeError: handshake.error });
+        } else {
+          // we don't support switching connections yet
+          self.runner.abort();
+          self.handshakeCallbacks[handshake.action](handshake);
+        }
       }
     };
-    this.runner = this.strategy.connect(0, callback);
+    self.runner = self.strategy.connect(0, callback);
 
-    this.setUnavailableTimer();
+    self.setUnavailableTimer();
   };
 
   /** Sends raw data.
@@ -2744,6 +3009,10 @@
     }
   };
 
+  prototype.isEncrypted = function() {
+    return this.encrypted;
+  };
+
   /** @private */
   prototype.updateStrategy = function() {
     this.strategy = this.options.getStrategy({
@@ -2756,41 +3025,38 @@
   /** @private */
   prototype.retryIn = function(delay) {
     var self = this;
-    this.retryTimer = setTimeout(function() {
-      if (self.retryTimer === null) {
-        return;
-      }
-      self.retryTimer = null;
+    self.timeline.info({ action: "retry", delay: delay });
+    if (delay > 0) {
+      self.emit("connecting_in", Math.round(delay / 1000));
+    }
+    self.retryTimer = new Pusher.Timer(delay || 0, function() {
       self.disconnect();
       self.connect();
-    }, delay || 0);
+    });
   };
 
   /** @private */
   prototype.clearRetryTimer = function() {
     if (this.retryTimer) {
-      clearTimeout(this.retryTimer);
-      this.retryTimer = null;
+      this.retryTimer.ensureAborted();
     }
   };
 
   /** @private */
   prototype.setUnavailableTimer = function() {
     var self = this;
-    this.unavailableTimer = setTimeout(function() {
-      if (!self.unavailableTimer) {
-        return;
+    self.unavailableTimer = new Pusher.Timer(
+      self.options.unavailableTimeout,
+      function() {
+        self.updateState("unavailable");
       }
-      self.updateState("unavailable");
-      self.unavailableTimer = null;
-    }, this.options.unavailableTimeout);
+    );
   };
 
   /** @private */
   prototype.clearUnavailableTimer = function() {
     if (this.unavailableTimer) {
-      clearTimeout(this.unavailableTimer);
-      this.unavailableTimer = null;
+      this.unavailableTimer.ensureAborted();
     }
   };
 
@@ -2800,34 +3066,34 @@
     // send ping after inactivity
     if (!this.connection.supportsPing()) {
       var self = this;
-      this.activityTimer = setTimeout(function() {
-        self.send_event('pusher:ping', {});
-        // wait for pong response
-        self.activityTimer = setTimeout(function() {
-          self.connection.close();
-        }, (self.options.pongTimeout));
-      }, (this.options.activityTimeout));
+      self.activityTimer = new Pusher.Timer(
+        self.options.activityTimeout,
+        function() {
+          self.send_event('pusher:ping', {});
+          // wait for pong response
+          self.activityTimer = new Pusher.Timer(
+            self.options.pongTimeout,
+            function() {
+              self.timeline.error({ pong_timed_out: self.options.pongTimeout });
+              self.connection.close();
+            }
+          );
+        }
+      );
     }
   };
 
   /** @private */
   prototype.stopActivityCheck = function() {
     if (this.activityTimer) {
-      clearTimeout(this.activityTimer);
-      this.activityTimer = null;
+      this.activityTimer.ensureAborted();
     }
   };
 
   /** @private */
-  prototype.buildCallbacks = function() {
+  prototype.buildConnectionCallbacks = function() {
     var self = this;
     return {
-      connected: function(id) {
-        self.clearUnavailableTimer();
-        self.socket_id = id;
-        self.updateState("connected");
-        self.resetActivityCheck();
-      },
       message: function(message) {
         // includes pong messages from server
         self.resetActivityCheck();
@@ -2848,21 +3114,52 @@
         if (self.shouldRetry()) {
           self.retryIn(1000);
         }
-      },
-      ssl_only: function() {
+      }
+    };
+  };
+
+  /** @private */
+  prototype.buildHandshakeCallbacks = function(errorCallbacks) {
+    var self = this;
+    return Pusher.Util.extend({}, errorCallbacks, {
+      connected: function(handshake) {
+        self.clearUnavailableTimer();
+        self.setConnection(handshake.connection);
+        self.socket_id = self.connection.id;
+        self.timeline.info({ socket_id: self.socket_id });
+        self.updateState("connected");
+      }
+    });
+  };
+
+  /** @private */
+  prototype.buildErrorCallbacks = function() {
+    var self = this;
+
+    function withErrorEmitted(callback) {
+      return function(result) {
+        if (result.error) {
+          self.emit("error", { type: "WebSocketError", error: result.error });
+        }
+        callback(result);
+      };
+    }
+
+    return {
+      ssl_only: withErrorEmitted(function() {
         self.encrypted = true;
         self.updateStrategy();
         self.retryIn(0);
-      },
-      refused: function() {
+      }),
+      refused: withErrorEmitted(function() {
         self.disconnect();
-      },
-      backoff: function() {
+      }),
+      backoff: withErrorEmitted(function() {
         self.retryIn(1000);
-      },
-      retry: function() {
+      }),
+      retry: withErrorEmitted(function() {
         self.retryIn(0);
-      }
+      })
     };
   };
 
@@ -2877,6 +3174,9 @@
 
   /** @private */
   prototype.abandonConnection = function() {
+    if (!this.connection) {
+      return;
+    }
     for (var event in this.connectionCallbacks) {
       this.connection.unbind(event, this.connectionCallbacks[event]);
     }
@@ -2892,6 +3192,7 @@
     if (previousState !== newState) {
       Pusher.debug('State changed', previousState + ' -> ' + newState);
 
+      this.timeline.info({ state: newState });
       this.emit('state_change', { previous: previousState, current: newState });
       this.emit(newState, data);
     }
@@ -2900,11 +3201,6 @@
   /** @private */
   prototype.shouldRetry = function() {
     return this.state === "connecting" || this.state === "connected";
-  };
-
-  /** @private */
-  prototype.wrapTransport = function(transport) {
-    return new Pusher.ProtocolWrapper(transport);
   };
 
   Pusher.ConnectionManager = ConnectionManager;
@@ -2956,194 +3252,338 @@
 }).call(this);
 
 ;(function() {
-  Pusher.Channels = function() {
-    this.channels = {};
-  };
+  /** Represents a collection of members of a presence channel. */
+  function Members() {
+    this.reset();
+  }
+  var prototype = Members.prototype;
 
-  Pusher.Channels.prototype = {
-    add: function(channel_name, pusher) {
-      var existing_channel = this.find(channel_name);
-      if (!existing_channel) {
-        var channel = Pusher.Channel.factory(channel_name, pusher);
-        this.channels[channel_name] = channel;
-        return channel;
-      } else {
-        return existing_channel;
-      }
-    },
-
-    find: function(channel_name) {
-      return this.channels[channel_name];
-    },
-
-    remove: function(channel_name) {
-      delete this.channels[channel_name];
-    },
-
-    disconnect: function () {
-      for(var channel_name in this.channels){
-        this.channels[channel_name].disconnect()
-      }
+  /** Returns member's info for given id.
+   *
+   * Resulting object containts two fields - id and info.
+   *
+   * @param {Number} id
+   * @return {Object} member's info or null
+   */
+  prototype.get = function(id) {
+    if (Object.prototype.hasOwnProperty.call(this.members, id)) {
+      return {
+        id: id,
+        info: this.members[id]
+      };
+    } else {
+      return null;
     }
   };
 
-  Pusher.Channel = function(channel_name, pusher) {
+  /** Calls back for each member in unspecified order.
+   *
+   * @param  {Function} callback
+   */
+  prototype.each = function(callback) {
     var self = this;
-    Pusher.EventsDispatcher.call(this, function(event_name, event_data) {
-      Pusher.debug('No callbacks on ' + channel_name + ' for ' + event_name);
-    });
-
-    this.pusher = pusher;
-    this.name = channel_name;
-    this.subscribed = false;
-
-    this.bind('pusher_internal:subscription_succeeded', function(data) {
-      self.onSubscriptionSucceeded(data);
+    Pusher.Util.objectApply(self.members, function(member, id) {
+      callback(self.get(id));
     });
   };
 
-  Pusher.Channel.prototype = {
-    // inheritable constructor
-    init: function() {},
-    disconnect: function() {
-      this.subscribed = false;
-      this.emit("pusher_internal:disconnected");
-    },
+  /** Updates the id for connected member. For internal use only. */
+  prototype.setMyID = function(id) {
+    this.myID = id;
+  };
 
-    onSubscriptionSucceeded: function(data) {
-      this.subscribed = true;
-      this.emit('pusher:subscription_succeeded');
-    },
+  /** Handles subscription data. For internal use only. */
+  prototype.onSubscription = function(subscriptionData) {
+    this.members = subscriptionData.presence.hash;
+    this.count = subscriptionData.presence.count;
+    this.me = this.get(this.myID);
+  };
 
-    authorize: function(socketId, options, callback){
-      return callback(false, {}); // normal channels don't require auth
-    },
-
-    trigger: function(event, data) {
-      return this.pusher.send_event(event, data, this.name);
+  /** Adds a new member to the collection. For internal use only. */
+  prototype.addMember = function(memberData) {
+    if (this.get(memberData.user_id) === null) {
+      this.count++;
     }
+    this.members[memberData.user_id] = memberData.user_info;
+    return this.get(memberData.user_id);
   };
 
-  Pusher.Util.extend(Pusher.Channel.prototype, Pusher.EventsDispatcher.prototype);
-
-  Pusher.Channel.PrivateChannel = {
-    authorize: function(socketId, options, callback){
-      var self = this;
-      var authorizer = new Pusher.Channel.Authorizer(this, Pusher.channel_auth_transport, options);
-      return authorizer.authorize(socketId, function(err, authData) {
-        if(!err) {
-          self.emit('pusher_internal:authorized', authData);
-        }
-
-        callback(err, authData);
-      });
+  /** Adds a member from the collection. For internal use only. */
+  prototype.removeMember = function(memberData) {
+    var member = this.get(memberData.user_id);
+    if (member) {
+      delete this.members[memberData.user_id];
+      this.count--;
     }
+    return member;
   };
 
-  Pusher.Channel.PresenceChannel = {
-    init: function(){
-      this.members = new Members(this); // leeches off channel events
-    },
-
-    onSubscriptionSucceeded: function(data) {
-      this.subscribed = true;
-      // We override this because we want the Members obj to be responsible for
-      // emitting the pusher:subscription_succeeded.  It will do this after it has done its work.
-    }
+  /** Resets the collection to the initial state. For internal use only. */
+  prototype.reset = function() {
+    this.members = {};
+    this.count = 0;
+    this.myID = null;
+    this.me = null;
   };
 
-  var Members = function(channel) {
-    var self = this;
-    var channelData = null;
-
-    var reset = function() {
-      self._members_map = {};
-      self.count = 0;
-      self.me = null;
-      channelData = null;
-    };
-    reset();
-
-    var subscriptionSucceeded = function(subscriptionData) {
-      self._members_map = subscriptionData.presence.hash;
-      self.count = subscriptionData.presence.count;
-      self.me = self.get(channelData.user_id);
-      channel.emit('pusher:subscription_succeeded', self);
-    };
-
-    channel.bind('pusher_internal:authorized', function(authorizedData) {
-      channelData = JSON.parse(authorizedData.channel_data);
-      channel.bind("pusher_internal:subscription_succeeded", subscriptionSucceeded);
-    });
-
-    channel.bind('pusher_internal:member_added', function(data) {
-      if(self.get(data.user_id) === null) { // only incr if user_id does not already exist
-        self.count++;
-      }
-
-      self._members_map[data.user_id] = data.user_info;
-      channel.emit('pusher:member_added', self.get(data.user_id));
-    });
-
-    channel.bind('pusher_internal:member_removed', function(data) {
-      var member = self.get(data.user_id);
-      if(member) {
-        delete self._members_map[data.user_id];
-        self.count--;
-        channel.emit('pusher:member_removed', member);
-      }
-    });
-
-    channel.bind('pusher_internal:disconnected', function() {
-      reset();
-      channel.unbind("pusher_internal:subscription_succeeded", subscriptionSucceeded);
-    });
-  };
-
-  Members.prototype = {
-    each: function(callback) {
-      for(var i in this._members_map) {
-        callback(this.get(i));
-      }
-    },
-
-    get: function(user_id) {
-      if (this._members_map.hasOwnProperty(user_id)) { // have heard of this user user_id
-        return {
-          id: user_id,
-          info: this._members_map[user_id]
-        }
-      } else { // have never heard of this user
-        return null;
-      }
-    }
-  };
-
-  Pusher.Channel.factory = function(channel_name, pusher){
-    var channel = new Pusher.Channel(channel_name, pusher);
-    if (channel_name.indexOf('private-') === 0) {
-      Pusher.Util.extend(channel, Pusher.Channel.PrivateChannel);
-    } else if (channel_name.indexOf('presence-') === 0) {
-      Pusher.Util.extend(channel, Pusher.Channel.PrivateChannel);
-      Pusher.Util.extend(channel, Pusher.Channel.PresenceChannel);
-    };
-    channel.init();
-    return channel;
-  };
+  Pusher.Members = Members;
 }).call(this);
 
 ;(function() {
-  Pusher.Channel.Authorizer = function(channel, type, options) {
-    this.channel = channel;
-    this.type = type;
+  /** Provides base public channel interface with an event emitter.
+   *
+   * Emits:
+   * - pusher:subscription_succeeded - after subscribing successfully
+   * - other non-internal events
+   *
+   * @param {String} name
+   * @param {Pusher} pusher
+   */
+  function Channel(name, pusher) {
+    Pusher.EventsDispatcher.call(this, function(event, data) {
+      Pusher.debug('No callbacks on ' + name + ' for ' + event);
+    });
 
+    this.name = name;
+    this.pusher = pusher;
+    this.subscribed = false;
+  }
+  var prototype = Channel.prototype;
+  Pusher.Util.extend(prototype, Pusher.EventsDispatcher.prototype);
+
+  /** Skips authorization, since public channels don't require it.
+   *
+   * @param {Function} callback
+   */
+  prototype.authorize = function(socketId, callback) {
+    return callback(false, {});
+  };
+
+  /** Triggers an event */
+  prototype.trigger = function(event, data) {
+    return this.pusher.send_event(event, data, this.name);
+  };
+
+  /** Signals disconnection to the channel. For internal use only. */
+  prototype.disconnect = function() {
+    this.subscribed = false;
+  };
+
+  /** Handles an event. For internal use only.
+   *
+   * @param {String} event
+   * @param {*} data
+   */
+  prototype.handleEvent = function(event, data) {
+    if (event.indexOf("pusher_internal:") === 0) {
+      if (event === "pusher_internal:subscription_succeeded") {
+        this.subscribed = true;
+        this.emit("pusher:subscription_succeeded", data);
+      }
+    } else {
+      this.emit(event, data);
+    }
+  };
+
+  /** Sends a subscription request. For internal use only. */
+  prototype.subscribe = function() {
+    var self = this;
+
+    self.authorize(self.pusher.connection.socket_id, function(error, data) {
+      if (error) {
+        self.handleEvent('pusher:subscription_error', data);
+      } else {
+        self.pusher.send_event('pusher:subscribe', {
+          auth: data.auth,
+          channel_data: data.channel_data,
+          channel: self.name
+        });
+      }
+    });
+  };
+
+  /** Sends an unsubscription request. For internal use only. */
+  prototype.unsubscribe = function() {
+    this.pusher.send_event('pusher:unsubscribe', {
+      channel: this.name
+    });
+  };
+
+  Pusher.Channel = Channel;
+}).call(this);
+
+;(function() {
+  /** Extends public channels to provide private channel interface.
+   *
+   * @param {String} name
+   * @param {Pusher} pusher
+   */
+  function PrivateChannel(name, pusher) {
+    Pusher.Channel.call(this, name, pusher);
+  }
+  var prototype = PrivateChannel.prototype;
+  Pusher.Util.extend(prototype, Pusher.Channel.prototype);
+
+  /** Authorizes the connection to use the channel.
+   *
+   * @param  {String} socketId
+   * @param  {Function} callback
+   */
+  prototype.authorize = function(socketId, callback) {
+    var authorizer = new Pusher.Channel.Authorizer(this, this.pusher.config);
+    return authorizer.authorize(socketId, callback);
+  };
+
+  Pusher.PrivateChannel = PrivateChannel;
+}).call(this);
+
+;(function() {
+  /** Adds presence channel functionality to private channels.
+   *
+   * @param {String} name
+   * @param {Pusher} pusher
+   */
+  function PresenceChannel(name, pusher) {
+    Pusher.PrivateChannel.call(this, name, pusher);
+    this.members = new Pusher.Members();
+  }
+  var prototype = PresenceChannel.prototype;
+  Pusher.Util.extend(prototype, Pusher.PrivateChannel.prototype);
+
+  /** Authenticates the connection as a member of the channel.
+   *
+   * @param  {String} socketId
+   * @param  {Function} callback
+   */
+  prototype.authorize = function(socketId, callback) {
+    var _super = Pusher.PrivateChannel.prototype.authorize;
+    var self = this;
+    _super.call(self, socketId, function(error, authData) {
+      if (!error) {
+        if (authData.channel_data === undefined) {
+          Pusher.warn(
+            "Invalid auth response for channel '" +
+            self.name +
+            "', expected 'channel_data' field"
+          );
+          callback("Invalid auth response");
+          return;
+        }
+        var channelData = JSON.parse(authData.channel_data);
+        self.members.setMyID(channelData.user_id);
+      }
+      callback(error, authData);
+    });
+  };
+
+  /** Handles presence and subscription events. For internal use only.
+   *
+   * @param {String} event
+   * @param {*} data
+   */
+  prototype.handleEvent = function(event, data) {
+    switch (event) {
+      case "pusher_internal:subscription_succeeded":
+        this.members.onSubscription(data);
+        this.subscribed = true;
+        this.emit("pusher:subscription_succeeded", this.members);
+        break;
+      case "pusher_internal:member_added":
+        var addedMember = this.members.addMember(data);
+        this.emit('pusher:member_added', addedMember);
+        break;
+      case "pusher_internal:member_removed":
+        var removedMember = this.members.removeMember(data);
+        if (removedMember) {
+          this.emit('pusher:member_removed', removedMember);
+        }
+        break;
+      default:
+        Pusher.PrivateChannel.prototype.handleEvent.call(this, event, data);
+    }
+  };
+
+  /** Resets the channel state, including members map. For internal use only. */
+  prototype.disconnect = function() {
+    this.members.reset();
+    Pusher.PrivateChannel.prototype.disconnect.call(this);
+  };
+
+  Pusher.PresenceChannel = PresenceChannel;
+}).call(this);
+
+;(function() {
+  /** Handles a channel map. */
+  function Channels() {
+    this.channels = {};
+  }
+  var prototype = Channels.prototype;
+
+  /** Creates or retrieves an existing channel by its name.
+   *
+   * @param {String} name
+   * @param {Pusher} pusher
+   * @return {Channel}
+   */
+  prototype.add = function(name, pusher) {
+    if (!this.channels[name]) {
+      this.channels[name] = createChannel(name, pusher);
+    }
+    return this.channels[name];
+  };
+
+  /** Finds a channel by its name.
+   *
+   * @param {String} name
+   * @return {Channel} channel or null if it doesn't exist
+   */
+  prototype.find = function(name) {
+    return this.channels[name];
+  };
+
+  /** Removes a channel from the map.
+   *
+   * @param {String} name
+   */
+  prototype.remove = function(name) {
+    var channel = this.channels[name];
+    delete this.channels[name];
+    return channel;
+  };
+
+  /** Proxies disconnection signal to all channels. */
+  prototype.disconnect = function() {
+    Pusher.Util.objectApply(this.channels, function(channel) {
+      channel.disconnect();
+    });
+  };
+
+  function createChannel(name, pusher) {
+    if (name.indexOf('private-') === 0) {
+      return new Pusher.PrivateChannel(name, pusher);
+    } else if (name.indexOf('presence-') === 0) {
+      return new Pusher.PresenceChannel(name, pusher);
+    } else {
+      return new Pusher.Channel(name, pusher);
+    }
+  }
+
+  Pusher.Channels = Channels;
+}).call(this);
+
+;(function() {
+  Pusher.Channel.Authorizer = function(channel, options) {
+    this.channel = channel;
+    this.type = options.authTransport;
+
+    this.options = options;
     this.authOptions = (options || {}).auth || {};
   };
 
   Pusher.Channel.Authorizer.prototype = {
     composeQuery: function(socketId) {
-      var query = '&socket_id=' + encodeURIComponent(socketId)
-        + '&channel_name=' + encodeURIComponent(this.channel.name);
+      var query = '&socket_id=' + encodeURIComponent(socketId) +
+        '&channel_name=' + encodeURIComponent(this.channel.name);
 
       for(var i in this.authOptions.params) {
         query += "&" + encodeURIComponent(i) + "=" + encodeURIComponent(this.authOptions.params[i]);
@@ -3157,6 +3597,7 @@
     }
   };
 
+  var nextAuthCallbackID = 1;
 
   Pusher.auth_callbacks = {};
   Pusher.authorizers = {
@@ -3169,10 +3610,10 @@
         xhr = (window.XMLHttpRequest ? new window.XMLHttpRequest() : new ActiveXObject("Microsoft.XMLHTTP"));
       }
 
-      xhr.open("POST", Pusher.channel_auth_endpoint, true);
+      xhr.open("POST", self.options.authEndpoint, true);
 
       // add request headers
-      xhr.setRequestHeader("Content-Type", "application/x-www-form-urlencoded")
+      xhr.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
       for(var headerName in this.authOptions.headers) {
         xhr.setRequestHeader(headerName, this.authOptions.headers[headerName]);
       }
@@ -3208,17 +3649,21 @@
         Pusher.warn("Warn", "To send headers with the auth request, you must use AJAX, rather than JSONP.");
       }
 
+      var callbackName = nextAuthCallbackID.toString();
+      nextAuthCallbackID++;
+
+      var document = Pusher.Util.getDocument();
       var script = document.createElement("script");
       // Hacked wrapper.
-      Pusher.auth_callbacks[this.channel.name] = function(data) {
+      Pusher.auth_callbacks[callbackName] = function(data) {
         callback(false, data);
       };
 
-      var callback_name = "Pusher.auth_callbacks['" + this.channel.name + "']";
-      script.src = Pusher.channel_auth_endpoint
-        + '?callback='
-        + encodeURIComponent(callback_name)
-        + this.composeQuery(socketId);
+      var callback_name = "Pusher.auth_callbacks['" + callbackName + "']";
+      script.src = this.options.authEndpoint +
+        '?callback=' +
+        encodeURIComponent(callback_name) +
+        this.composeQuery(socketId);
 
       var head = document.getElementsByTagName("head")[0] || document.documentElement;
       head.insertBefore( script, head.firstChild );
