@@ -1,5 +1,6 @@
 require "pusher_rails/version"
 require "pusher_rails/railtie"
+require "pusher_rails/helpers"
 
 module PusherRails
   URL = {

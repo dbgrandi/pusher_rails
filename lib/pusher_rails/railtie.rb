@@ -8,7 +8,7 @@ module PusherRails
     initializer 'pusher_rails' do |app|
       ## Add the Rails Helpers
       ActiveSupport.on_load :action_view do
-        include PusherRails::RailsHelpers
+        include PusherRails::Helpers
       end
     end
   end
