@@ -1,5 +1,5 @@
 /*!
- * Pusher JavaScript Library v2.1.2
+ * Pusher JavaScript Library v2.1.5
  * http://pusherapp.com/
  *
  * Copyright 2013, Pusher
@@ -86,6 +86,7 @@
     });
 
     Pusher.instances.push(this);
+    this.timeline.info({ instances: Pusher.instances.length });
 
     if (Pusher.isReady) self.connect();
   }
@@ -126,6 +127,10 @@
 
   prototype.channel = function(name) {
     return this.channels.find(name);
+  };
+
+  prototype.allChannels = function() {
+    return this.channels.all();
   };
 
   prototype.connect = function() {
@@ -209,6 +214,79 @@
 }).call(this);
 
 ;(function() {
+  /** Cross-browser compatible timer abstraction.
+   *
+   * @param {Number} delay
+   * @param {Function} callback
+   */
+  function Timer(delay, callback) {
+    var self = this;
+
+    this.timeout = setTimeout(function() {
+      if (self.timeout !== null) {
+        callback();
+        self.timeout = null;
+      }
+    }, delay);
+  }
+  var prototype = Timer.prototype;
+
+  /** Returns whether the timer is still running.
+   *
+   * @return {Boolean}
+   */
+  prototype.isRunning = function() {
+    return this.timeout !== null;
+  };
+
+  /** Aborts a timer when it's running. */
+  prototype.ensureAborted = function() {
+    if (this.timeout) {
+      clearTimeout(this.timeout);
+      this.timeout = null;
+    }
+  };
+
+  Pusher.Timer = Timer;
+}).call(this);
+
+;(function() {
+  /** Cross-browser compatible periodic timer abstraction.
+   *
+   * @param {Number} interval
+   * @param {Function} callback
+   */
+  function PeriodicTimer(interval, callback) {
+    var self = this;
+
+    this.interval = setInterval(function() {
+      if (self.interval !== null) {
+        callback();
+      }
+    }, interval);
+  }
+  var prototype = PeriodicTimer.prototype;
+
+  /** Returns whether the timer is still running.
+   *
+   * @return {Boolean}
+   */
+  prototype.isRunning = function() {
+    return this.interval !== null;
+  };
+
+  /** Aborts a timer when it's running. */
+  prototype.ensureAborted = function() {
+    if (this.interval) {
+      clearInterval(this.interval);
+      this.interval = null;
+    }
+  };
+
+  Pusher.PeriodicTimer = PeriodicTimer;
+}).call(this);
+
+;(function() {
   Pusher.Util = {
     now: function() {
       if (Date.now) {
@@ -216,6 +294,10 @@
       } else {
         return new Date().valueOf();
       }
+    },
+
+    defer: function(callback) {
+      return new Pusher.Timer(0, callback);
     },
 
     /** Merges multiple objects into the target argument.
@@ -281,32 +363,6 @@
       return -1;
     },
 
-    keys: function(object) {
-      var result = [];
-      for (var key in object) {
-        if (Object.prototype.hasOwnProperty.call(object, key)) {
-          result.push(key);
-        }
-      }
-      return result;
-    },
-
-    /** Applies a function f to all elements of an array.
-     *
-     * Function f gets 3 arguments passed:
-     * - element from the array
-     * - index of the element
-     * - reference to the array
-     *
-     * @param {Array} array
-     * @param {Function} f
-     */
-    apply: function(array, f) {
-      for (var i = 0; i < array.length; i++) {
-        f(array[i], i, array);
-      }
-    },
-
     /** Applies a function f to all properties of an object.
      *
      * Function f gets 3 arguments passed:
@@ -322,6 +378,48 @@
         if (Object.prototype.hasOwnProperty.call(object, key)) {
           f(object[key], key, object);
         }
+      }
+    },
+
+    /** Return a list of object's own property keys
+     *
+     * @param {Object} object
+     * @returns {Array}
+     */
+    keys: function(object) {
+      var keys = [];
+      Pusher.Util.objectApply(object, function(_, key) {
+        keys.push(key);
+      });
+      return keys;
+    },
+
+    /** Return a list of object's own property values
+     *
+     * @param {Object} object
+     * @returns {Array}
+     */
+    values: function(object) {
+      var values = [];
+      Pusher.Util.objectApply(object, function(value) {
+        values.push(value);
+      });
+      return values;
+    },
+
+    /** Applies a function f to all elements of an array.
+     *
+     * Function f gets 3 arguments passed:
+     * - element from the array
+     * - index of the element
+     * - reference to the array
+     *
+     * @param {Array} array
+     * @param {Function} f
+     */
+    apply: function(array, f) {
+      for (var i = 0; i < array.length; i++) {
+        f(array[i], i, array);
       }
     },
 
@@ -357,11 +455,9 @@
      */
     mapObject: function(object, f) {
       var result = {};
-      for (var key in object) {
-        if (Object.prototype.hasOwnProperty.call(object, key)) {
-          result[key] = f(object[key]);
-        }
-      }
+      Pusher.Util.objectApply(object, function(value, key) {
+        result[key] = f(value);
+      });
       return result;
     },
 
@@ -400,16 +496,12 @@
      * @param {Function} f
      */
     filterObject: function(object, test) {
-      test = test || function(value) { return !!value; };
-
       var result = {};
-      for (var key in object) {
-        if (Object.prototype.hasOwnProperty.call(object, key)) {
-          if (test(object[key], key, object, result)) {
-            result[key] = object[key];
-          }
+      Pusher.Util.objectApply(object, function(value, key) {
+        if ((test && test(value, key, object, result)) || Boolean(value)) {
+          result[key] = value;
         }
-      }
+      });
       return result;
     },
 
@@ -420,11 +512,9 @@
      */
     flatten: function(object) {
       var result = [];
-      for (var key in object) {
-        if (Object.prototype.hasOwnProperty.call(object, key)) {
-          result.push([key, object[key]]);
-        }
-      }
+      Pusher.Util.objectApply(object, function(value, key) {
+        result.push([key, value]);
+      });
       return result;
     },
 
@@ -509,8 +599,8 @@
 }).call(this);
 
 ;(function() {
-  Pusher.VERSION = '2.1.2';
-  Pusher.PROTOCOL = 6;
+  Pusher.VERSION = '2.1.5';
+  Pusher.PROTOCOL = 7;
 
   // DEPRECATED: WS connection parameters
   Pusher.host = 'ws.pusherapp.com';
@@ -622,6 +712,7 @@
 
   /** Error classes used throughout pusher-js library. */
   Pusher.Errors = {
+    BadEventName: buildExceptionClass("BadEventName"),
     UnsupportedTransport: buildExceptionClass("UnsupportedTransport"),
     UnsupportedStrategy: buildExceptionClass("UnsupportedStrategy"),
     TransportPriorityTooLow: buildExceptionClass("TransportPriorityTooLow"),
@@ -851,79 +942,6 @@
   }
 })();
 
-;(function() {
-  /** Cross-browser compatible timer abstraction.
-   *
-   * @param {Number} delay
-   * @param {Function} callback
-   */
-  function Timer(delay, callback) {
-    var self = this;
-
-    this.timeout = setTimeout(function() {
-      if (self.timeout !== null) {
-        callback();
-        self.timeout = null;
-      }
-    }, delay);
-  }
-  var prototype = Timer.prototype;
-
-  /** Returns whether the timer is still running.
-   *
-   * @return {Boolean}
-   */
-  prototype.isRunning = function() {
-    return this.timeout !== null;
-  };
-
-  /** Aborts a timer when it's running. */
-  prototype.ensureAborted = function() {
-    if (this.timeout) {
-      clearTimeout(this.timeout);
-      this.timeout = null;
-    }
-  };
-
-  Pusher.Timer = Timer;
-}).call(this);
-
-;(function() {
-  /** Cross-browser compatible periodic timer abstraction.
-   *
-   * @param {Number} interval
-   * @param {Function} callback
-   */
-  function PeriodicTimer(interval, callback) {
-    var self = this;
-
-    this.interval = setInterval(function() {
-      if (self.interval !== null) {
-        callback();
-      }
-    }, interval);
-  }
-  var prototype = PeriodicTimer.prototype;
-
-  /** Returns whether the timer is still running.
-   *
-   * @return {Boolean}
-   */
-  prototype.isRunning = function() {
-    return this.interval !== null;
-  };
-
-  /** Aborts a timer when it's running. */
-  prototype.ensureAborted = function() {
-    if (this.interval) {
-      clearInterval(this.interval);
-      this.interval = null;
-    }
-  };
-
-  Pusher.PeriodicTimer = PeriodicTimer;
-}).call(this);
-
 (function() {
 
   var Base64 = {
@@ -1141,7 +1159,7 @@
       this.events.push(
         Pusher.Util.extend({}, event, {
           timestamp: Pusher.Util.now(),
-          level: level
+          level: (level !== Timeline.INFO ? level : undefined)
         })
       );
       if (this.options.limit && this.events.length > this.options.limit) {
@@ -1169,21 +1187,17 @@
   prototype.send = function(sendJSONP, callback) {
     var self = this;
 
-    var data = {};
-    if (this.sent === 0) {
-      data = Pusher.Util.extend({
-        key: this.key,
-        features: this.options.features,
-        version: this.options.version
-      }, this.options.params || {});
-    }
-    data.session = this.session;
-    data.timeline = this.events;
-    data = Pusher.Util.filterObject(data, function(v) {
-      return v !== undefined;
-    });
+    var data = Pusher.Util.extend({
+      session: self.session,
+      bundle: self.sent + 1,
+      key: self.key,
+      lib: "js",
+      version: self.options.version,
+      features: self.options.features,
+      timeline: self.events
+    }, self.options.params);
 
-    this.events = [];
+    self.events = [];
     sendJSONP(data, function(error, result) {
       if (!error) {
         self.sent++;
@@ -1221,12 +1235,14 @@
 
     var sendJSONP = function(data, callback) {
       var params = {
-        data: data,
+        data: Pusher.Util.filterObject(data, function(v) {
+          return v !== undefined;
+        }),
         url: scheme + (self.host || self.options.host) + self.options.path,
         receiver: Pusher.JSONP
       };
       return Pusher.JSONPRequest.send(params, function(error, result) {
-        if (result.host) {
+        if (result && result.host) {
           self.host = result.host;
         }
         if (callback) {
@@ -1326,6 +1342,7 @@
     this.strategy = strategy;
     this.transports = transports;
     this.ttl = options.ttl || 1800*1000;
+    this.encrypted = options.encrypted;
     this.timeline = options.timeline;
   }
   var prototype = CachedStrategy.prototype;
@@ -1335,7 +1352,8 @@
   };
 
   prototype.connect = function(minPriority, callback) {
-    var info = fetchTransportInfo();
+    var encrypted = this.encrypted;
+    var info = fetchTransportCache(encrypted);
 
     var strategies = [this.strategy];
     if (info && info.timestamp + this.ttl >= Pusher.Util.now()) {
@@ -1354,7 +1372,7 @@
       minPriority,
       function cb(error, handshake) {
         if (error) {
-          flushTransportInfo();
+          flushTransportCache(encrypted);
           if (strategies.length > 0) {
             startTimestamp = Pusher.Util.now();
             runner = strategies.pop().connect(minPriority, cb);
@@ -1362,8 +1380,11 @@
             callback(error);
           }
         } else {
-          var latency = Pusher.Util.now() - startTimestamp;
-          storeTransportInfo(handshake.transport.name, latency);
+          storeTransportCache(
+            encrypted,
+            handshake.transport.name,
+            Pusher.Util.now() - startTimestamp
+          );
           callback(null, handshake);
         }
       }
@@ -1382,39 +1403,47 @@
     };
   };
 
-  function fetchTransportInfo() {
+  function getTransportCacheKey(encrypted) {
+    return "pusherTransport" + (encrypted ? "Encrypted" : "Unencrypted");
+  }
+
+  function fetchTransportCache(encrypted) {
     var storage = Pusher.Util.getLocalStorage();
     if (storage) {
-      var info = storage.pusherTransport;
-      if (info) {
-        return JSON.parse(storage.pusherTransport);
+      try {
+        var serializedCache = storage[getTransportCacheKey(encrypted)];
+        if (serializedCache) {
+          return JSON.parse(serializedCache);
+        }
+      } catch (e) {
+        flushTransportCache(encrypted);
       }
     }
     return null;
   }
 
-  function storeTransportInfo(transport, latency) {
+  function storeTransportCache(encrypted, transport, latency) {
     var storage = Pusher.Util.getLocalStorage();
     if (storage) {
       try {
-        storage.pusherTransport = JSON.stringify({
+        storage[getTransportCacheKey(encrypted)] = JSON.stringify({
           timestamp: Pusher.Util.now(),
           transport: transport,
           latency: latency
         });
-      } catch(e) {
+      } catch (e) {
         // catch over quota exceptions raised by localStorage
       }
     }
   }
 
-  function flushTransportInfo() {
+  function flushTransportCache(encrypted) {
     var storage = Pusher.Util.getLocalStorage();
-    if (storage && storage.pusherTransport) {
+    if (storage) {
       try {
-        delete storage.pusherTransport;
-      } catch(e) {
-        storage.pusherTransport = undefined;
+        delete storage[getTransportCacheKey(encrypted)];
+      } catch (e) {
+        // catch exceptions raised by localStorage
       }
     }
   }
@@ -1609,6 +1638,13 @@
     var timer = null;
     var runner = null;
 
+    if (options.timeout > 0) {
+      timer = new Pusher.Timer(options.timeout, function() {
+        runner.abort();
+        callback(true);
+      });
+    }
+
     runner = strategy.connect(minPriority, function(error, handshake) {
       if (error && timer && timer.isRunning() && !options.failFast) {
         // advance to the next strategy after the timeout
@@ -1619,13 +1655,6 @@
       }
       callback(error, handshake);
     });
-
-    if (options.timeout > 0) {
-      timer = new Pusher.Timer(options.timeout, function() {
-        runner.abort();
-        callback(true);
-      });
-    }
 
     return {
       abort: function() {
@@ -1664,9 +1693,7 @@
    * @returns {Boolean}
    */
   prototype.isSupported = function() {
-    return this.transport.isSupported({
-      disableFlash: !!this.options.disableFlash
-    });
+    return this.transport.isSupported();
   };
 
   /** Launches a connection attempt and returns a strategy runner.
@@ -1675,7 +1702,7 @@
    * @return {Object} strategy runner
    */
   prototype.connect = function(minPriority, callback) {
-    if (!this.transport.isSupported()) {
+    if (!this.isSupported()) {
       return failAttempt(new Pusher.Errors.UnsupportedStrategy(), callback);
     } else if (this.priority < minPriority) {
       return failAttempt(new Pusher.Errors.TransportPriorityTooLow(), callback);
@@ -1752,7 +1779,7 @@
   };
 
   function failAttempt(error, callback) {
-    new Pusher.Timer(0, function() {
+    Pusher.Util.defer(function() {
       callback(error);
     });
     return {
@@ -1803,6 +1830,7 @@
     this.key = key;
     this.state = "new";
     this.timeline = options.timeline;
+    this.activityTimeout = options.activityTimeout;
     this.id = this.timeline.generateUniqueID();
 
     this.options = {
@@ -1862,7 +1890,7 @@
       this.socket = this.createSocket(url);
     } catch (e) {
       var self = this;
-      new Pusher.Timer(0, function() {
+      Pusher.Util.defer(function() {
         self.onError(e);
         self.changeState("closed");
       });
@@ -1914,10 +1942,6 @@
     } else {
       return false;
     }
-  };
-
-  prototype.requestPing = function() {
-    this.emit("ping_request");
   };
 
   /** @protected */
@@ -2047,18 +2071,19 @@
    * @param {Object} environment
    * @returns {Boolean}
    */
-  FlashTransport.isSupported = function(environment) {
-    if (environment && environment.disableFlash) {
-      return false;
-    }
+  FlashTransport.isSupported = function() {
     try {
       return Boolean(new ActiveXObject('ShockwaveFlash.ShockwaveFlash'));
     } catch (e) {
-      return Boolean(
-        navigator &&
-        navigator.mimeTypes &&
-        navigator.mimeTypes["application/x-shockwave-flash"] !== undefined
-      );
+      try {
+        return Boolean(
+          navigator &&
+          navigator.mimeTypes &&
+          navigator.mimeTypes["application/x-shockwave-flash"] !== undefined
+        );
+      } catch(e) {
+        return false;
+      }
     }
   };
 
@@ -2252,39 +2277,29 @@
     this.transport = transport;
     this.minPingDelay = options.minPingDelay;
     this.maxPingDelay = options.maxPingDelay;
-    this.pingDelay = null;
+    this.pingDelay = undefined;
   }
   var prototype = AssistantToTheTransportManager.prototype;
 
   prototype.createConnection = function(name, priority, key, options) {
-    var connection = this.transport.createConnection(
+    var self = this;
+
+    var options = Pusher.Util.extend({}, options, {
+      activityTimeout: self.pingDelay
+    });
+    var connection = self.transport.createConnection(
       name, priority, key, options
     );
 
-    var self = this;
     var openTimestamp = null;
-    var pingTimer = null;
 
     var onOpen = function() {
       connection.unbind("open", onOpen);
-
-      openTimestamp = Pusher.Util.now();
-      if (self.pingDelay) {
-        pingTimer = setInterval(function() {
-          if (pingTimer) {
-            connection.requestPing();
-          }
-        }, self.pingDelay);
-      }
-
       connection.bind("closed", onClosed);
+      openTimestamp = Pusher.Util.now();
     };
     var onClosed = function(closeEvent) {
       connection.unbind("closed", onClosed);
-      if (pingTimer) {
-        clearInterval(pingTimer);
-        pingTimer = null;
-      }
 
       if (closeEvent.code === 1002 || closeEvent.code === 1003) {
         // we don't want to use transports not obeying the protocol
@@ -2303,8 +2318,8 @@
     return connection;
   };
 
-  prototype.isSupported = function(environment) {
-    return this.manager.isAlive() && this.transport.isSupported(environment);
+  prototype.isSupported = function() {
+    return this.manager.isAlive() && this.transport.isSupported();
   };
 
   Pusher.AssistantToTheTransportManager = AssistantToTheTransportManager;
@@ -2355,6 +2370,23 @@
     sockjs: Pusher.SockJSTransport
   };
 
+  var UnsupportedStrategy = {
+    isSupported: function() {
+      return false;
+    },
+    connect: function(_, callback) {
+      var deferred = Pusher.Util.defer(function() {
+        callback(new Pusher.Errors.UnsupportedStrategy());
+      });
+      return {
+        abort: function() {
+          deferred.ensureAborted();
+        },
+        forceMinPriority: function() {}
+      };
+    }
+  };
+
   // DSL bindings
 
   function returnWithOriginalContext(f) {
@@ -2377,19 +2409,31 @@
       if (!transportClass) {
         throw new Pusher.Errors.UnsupportedTransport(type);
       }
-      var transportOptions = Pusher.Util.extend({}, {
-        key: context.key,
-        encrypted: context.encrypted,
-        timeline: context.timeline,
-        disableFlash: context.disableFlash,
-        ignoreNullOrigin: context.ignoreNullOrigin
-      }, options);
-      if (manager) {
-        transportClass = manager.getAssistant(transportClass);
+
+      var enabled =
+        (!context.enabledTransports ||
+          Pusher.Util.arrayIndexOf(context.enabledTransports, name) !== -1) &&
+        (!context.disabledTransports ||
+          Pusher.Util.arrayIndexOf(context.disabledTransports, name) === -1) &&
+        (name !== "flash" || context.disableFlash !== true);
+
+      var transport;
+      if (enabled) {
+        transport = new Pusher.TransportStrategy(
+          name,
+          priority,
+          manager ? manager.getAssistant(transportClass) : transportClass,
+          Pusher.Util.extend({
+            key: context.key,
+            encrypted: context.encrypted,
+            timeline: context.timeline,
+            ignoreNullOrigin: context.ignoreNullOrigin
+          }, options)
+        );
+      } else {
+        transport = UnsupportedStrategy;
       }
-      var transport = new Pusher.TransportStrategy(
-        name, priority, transportClass, transportOptions
-      );
+
       var newContext = context.def(context, name, transport)[1];
       newContext.transports = context.transports || {};
       newContext.transports[name] = transport;
@@ -2506,7 +2550,7 @@
   /**
    * Provides functions for handling Pusher protocol-specific messages.
    */
-  Protocol = {};
+  var Protocol = {};
 
   /**
    * Decodes a message in a Pusher format.
@@ -2563,7 +2607,11 @@
     message = this.decodeMessage(message);
 
     if (message.event === "pusher:connection_established") {
-      return { action: "connected", id: message.data.socket_id };
+      return {
+        action: "connected",
+        id: message.data.socket_id,
+        activityTimeout: message.data.activity_timeout * 1000
+      };
     } else if (message.event === "pusher:error") {
       // From protocol 6 close codes are sent only once, so this only
       // happens when connection does not support close codes
@@ -2660,6 +2708,7 @@
 
     this.id = id;
     this.transport = transport;
+    this.activityTimeout = transport.activityTimeout;
     this.bindListeners();
   }
   var prototype = Connection.prototype;
@@ -2735,9 +2784,6 @@
         self.emit('message', message);
       }
     };
-    var onPingRequest = function() {
-      self.emit("ping_request");
-    };
     var onError = function(error) {
       self.emit("error", { type: "WebSocketError", error: error });
     };
@@ -2755,12 +2801,10 @@
     var unbindListeners = function() {
       self.transport.unbind("closed", onClosed);
       self.transport.unbind("error", onError);
-      self.transport.unbind("ping_request", onPingRequest);
       self.transport.unbind("message", onMessage);
     };
 
     self.transport.bind("message", onMessage);
-    self.transport.bind("ping_request", onPingRequest);
     self.transport.bind("error", onError);
     self.transport.bind("closed", onClosed);
   };
@@ -2820,7 +2864,8 @@
         var result = Pusher.Protocol.processHandshake(m);
         if (result.action === "connected") {
           self.finish("connected", {
-            connection: new Pusher.Connection(result.id, self.transport)
+            connection: new Pusher.Connection(result.id, self.transport),
+            activityTimeout: result.activityTimeout
           });
         } else {
           self.finish(result.action, { error: result.error });
@@ -2875,8 +2920,9 @@
    * - initialized - initial state, never transitioned to
    * - connecting - connection is being established
    * - connected - connection has been fully established
-   * - disconnected - on requested disconnection or before reconnecting
+   * - disconnected - on requested disconnection
    * - unavailable - after connection timeout or when there's no network
+   * - failed - when the connection strategy is not supported
    *
    * Options:
    * - unavailableTimeout - time to transition to unavailable state
@@ -2904,16 +2950,12 @@
 
     Pusher.Network.bind("online", function() {
       self.timeline.info({ netinfo: "online" });
-      if (self.state === "unavailable") {
-        self.connect();
+      if (self.state === "connecting" || self.state === "unavailable") {
+        self.retryIn(0);
       }
     });
     Pusher.Network.bind("offline", function() {
       self.timeline.info({ netinfo: "offline" });
-      if (self.shouldRetry()) {
-        self.disconnect();
-        self.updateState("unavailable");
-      }
     });
 
     this.updateStrategy();
@@ -2928,42 +2970,16 @@
    * to find events emitted on connection attempts.
    */
   prototype.connect = function() {
-    var self = this;
-
-    if (self.connection) {
+    if (this.connection || this.runner) {
       return;
     }
-    if (self.state === "connecting") {
+    if (!this.strategy.isSupported()) {
+      this.updateState("failed");
       return;
     }
-
-    if (!self.strategy.isSupported()) {
-      self.updateState("failed");
-      return;
-    }
-    if (Pusher.Network.isOnline() === false) {
-      self.updateState("unavailable");
-      return;
-    }
-
-    self.updateState("connecting");
-
-    var callback = function(error, handshake) {
-      if (error) {
-        self.runner = self.strategy.connect(0, callback);
-      } else {
-        if (handshake.action === "error") {
-          self.timeline.error({ handshakeError: handshake.error });
-        } else {
-          // we don't support switching connections yet
-          self.runner.abort();
-          self.handshakeCallbacks[handshake.action](handshake);
-        }
-      }
-    };
-    self.runner = self.strategy.connect(0, callback);
-
-    self.setUnavailableTimer();
+    this.updateState("connecting");
+    this.startConnecting();
+    this.setUnavailableTimer();
   };
 
   /** Sends raw data.
@@ -2995,22 +3011,50 @@
 
   /** Closes the connection. */
   prototype.disconnect = function() {
-    if (this.runner) {
-      this.runner.abort();
-    }
-    this.clearRetryTimer();
-    this.clearUnavailableTimer();
-    this.stopActivityCheck();
+    this.disconnectInternally();
     this.updateState("disconnected");
-    // we're in disconnected state, so closing will not cause reconnecting
-    if (this.connection) {
-      this.connection.close();
-      this.abandonConnection();
-    }
   };
 
   prototype.isEncrypted = function() {
     return this.encrypted;
+  };
+
+  /** @private */
+  prototype.startConnecting = function() {
+    var self = this;
+    var callback = function(error, handshake) {
+      if (error) {
+        self.runner = self.strategy.connect(0, callback);
+      } else {
+        if (handshake.action === "error") {
+          self.timeline.error({ handshakeError: handshake.error });
+        } else {
+          self.abortConnecting(); // we don't support switching connections yet
+          self.handshakeCallbacks[handshake.action](handshake);
+        }
+      }
+    };
+    self.runner = self.strategy.connect(0, callback);
+  };
+
+  /** @private */
+  prototype.abortConnecting = function() {
+    if (this.runner) {
+      this.runner.abort();
+      this.runner = null;
+    }
+  };
+
+  /** @private */
+  prototype.disconnectInternally = function() {
+    this.abortConnecting();
+    this.clearRetryTimer();
+    this.clearUnavailableTimer();
+    this.stopActivityCheck();
+    if (this.connection) {
+      var connection = this.abandonConnection();
+      connection.close();
+    }
   };
 
   /** @private */
@@ -3030,7 +3074,7 @@
       self.emit("connecting_in", Math.round(delay / 1000));
     }
     self.retryTimer = new Pusher.Timer(delay || 0, function() {
-      self.disconnect();
+      self.disconnectInternally();
       self.connect();
     });
   };
@@ -3039,6 +3083,7 @@
   prototype.clearRetryTimer = function() {
     if (this.retryTimer) {
       this.retryTimer.ensureAborted();
+      this.retryTimer = null;
     }
   };
 
@@ -3067,7 +3112,7 @@
     if (!this.connection.supportsPing()) {
       var self = this;
       self.activityTimer = new Pusher.Timer(
-        self.options.activityTimeout,
+        self.activityTimeout,
         function() {
           self.send_event('pusher:ping', {});
           // wait for pong response
@@ -3075,7 +3120,7 @@
             self.options.pongTimeout,
             function() {
               self.timeline.error({ pong_timed_out: self.options.pongTimeout });
-              self.connection.close();
+              self.retryIn(0);
             }
           );
         }
@@ -3102,9 +3147,6 @@
       ping: function() {
         self.send_event('pusher:pong', {});
       },
-      ping_request: function() {
-        self.send_event('pusher:ping', {});
-      },
       error: function(error) {
         // just emit error to user - socket will already be closed by browser
         self.emit("error", { type: "WebSocketError", error: error });
@@ -3123,11 +3165,15 @@
     var self = this;
     return Pusher.Util.extend({}, errorCallbacks, {
       connected: function(handshake) {
+        self.activityTimeout = Math.min(
+          self.options.activityTimeout,
+          handshake.activityTimeout,
+          handshake.connection.activityTimeout || Infinity
+        );
         self.clearUnavailableTimer();
         self.setConnection(handshake.connection);
         self.socket_id = self.connection.id;
-        self.timeline.info({ socket_id: self.socket_id });
-        self.updateState("connected");
+        self.updateState("connected", { socket_id: self.socket_id });
       }
     });
   };
@@ -3180,19 +3226,18 @@
     for (var event in this.connectionCallbacks) {
       this.connection.unbind(event, this.connectionCallbacks[event]);
     }
+    var connection = this.connection;
     this.connection = null;
+    return connection;
   };
 
   /** @private */
   prototype.updateState = function(newState, data) {
     var previousState = this.state;
-
     this.state = newState;
-    // Only emit when the state changes
     if (previousState !== newState) {
       Pusher.debug('State changed', previousState + ' -> ' + newState);
-
-      this.timeline.info({ state: newState });
+      this.timeline.info({ state: newState, params: data });
       this.emit('state_change', { previous: previousState, current: newState });
       this.emit(newState, data);
     }
@@ -3361,6 +3406,11 @@
 
   /** Triggers an event */
   prototype.trigger = function(event, data) {
+    if (event.indexOf("client-") !== 0) {
+      throw new Pusher.Errors.BadEventName(
+        "Event '" + event + "' does not start with 'client-'"
+      );
+    }
     return this.pusher.send_event(event, data, this.name);
   };
 
@@ -3530,6 +3580,14 @@
       this.channels[name] = createChannel(name, pusher);
     }
     return this.channels[name];
+  };
+
+  /** Returns a list of all channels
+   *
+   * @return {Array}
+   */
+  prototype.all = function(name) {
+    return Pusher.Util.values(this.channels);
   };
 
   /** Finds a channel by its name.

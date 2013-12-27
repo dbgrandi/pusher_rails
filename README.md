@@ -1,38 +1,29 @@
-[Pusher](https://pusher.com) for Rails 3.1+
-=====================
+# PusherRails
 
-Adds:
-- [pusher-gem v0.12.0](https://github.com/pusher/pusher-gem/)
-- [pusher.js v2.1.2](https://github.com/pusher/pusher-js/)
-- [backpusher.js](https://github.com/pusher/backpusher)
+TODO: Write a gem description
 
-This pulls in the *pusher-gem* as well as adding *pusher.js* and *backpusher.js* to the assets pipeline of your Rails 3.1+ app.
+## Installation
 
-Add this to your app/assets/javascripts/application.js:
+Add this line to your application's Gemfile:
 
-    // if you want to use pusher.js
-    //= require pusher
+    gem 'pusher_rails'
 
-    // if you want to use pusher.min.js
-    //= require pusher.min
+And then execute:
 
-    // if you are using pusher.js + backbone.js
-    //= require backpusher
+    $ bundle
 
-Licenses
-========
+Or install it yourself as:
 
-    /*!
-     * Pusher JavaScript Library v1.12.2
-     * http://pusherapp.com/
-     *
-     * Copyright 2011, Pusher
-     * Released under the MIT licence.
-     */
+    $ gem install pusher_rails
 
-    //     Backpusher.js 0.0.2
-    //     (c) 2011-2012 Pusher.
-    //     Backpusher may be freely distributed under the MIT license.
-    //     For all details and documentation:
-    //     http://github.com/pusher/backpusher
+## Usage
 
+TODO: Write usage instructions here
+
+## Contributing
+
+1. Fork it
+2. Create your feature branch (`git checkout -b my-new-feature`)
+3. Commit your changes (`git commit -am 'Add some feature'`)
+4. Push to the branch (`git push origin my-new-feature`)
+5. Create new Pull Request

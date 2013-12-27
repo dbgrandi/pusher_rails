@@ -1,3 +1,10 @@
+v2.1.5.1
+======
+- Upgraded push.js libs
+- Added support for using the pusher CDN instead of the vendor file
+- Bumped pusher gem support to v0.12.0
+- Changed versioning scheme to follow pusher client lib versioning
+
 v1.0.1
 ======
 - Upgraded to pusher.js v2.0.2
