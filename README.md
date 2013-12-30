@@ -9,7 +9,7 @@ Adds:
 
 This pulls in the *pusher-gem* as well as adding *pusher.js*, *backpusher.js* and *underscore.js* to the assets pipeline of your Rails 3.1+ app.
 
-## Asset Pipeline Useage
+### Asset Pipeline Useage
 
 Add this to your app/assets/javascripts/application.js:
 
@@ -23,7 +23,7 @@ Add this to your app/assets/javascripts/application.js:
     //= require backpusher
     //= require underscore
 
-## New CDN Usage for Pusher
+### New CDN Usage for Pusher
 
 This is a new feature added to help keep up with patch revisions to the pusher.js library.  If you use the CDN helper provided,
 your code will reference the latest 2.1.x version of the pusher.js library without you having to wait for this gem to update
