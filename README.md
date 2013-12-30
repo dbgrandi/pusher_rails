@@ -1,29 +1,76 @@
-# PusherRails
+[Pusher](https://pusher.com) for Rails 3.1+
+=====================
 
-TODO: Write a gem description
+Adds:
+- [pusher-gem v0.11.3](https://github.com/pusher/pusher-gem/)
+- [pusher.js v2.1.5](https://github.com/pusher/pusher-js/)
+- [backpusher.js](https://github.com/pusher/backpusher)
+- [underscore.js](http://underscorejs.org/) - Dependency for backpusher.js
 
-## Installation
+This pulls in the *pusher-gem* as well as adding *pusher.js*, *backpusher.js* and *underscore.js* to the assets pipeline of your Rails 3.1+ app.
 
-Add this line to your application's Gemfile:
+## Asset Pipeline Useage
 
-    gem 'pusher_rails'
+Add this to your app/assets/javascripts/application.js:
 
-And then execute:
+    // if you want to use pusher.js
+    //= require pusher
 
-    $ bundle
+    // if you want to use pusher.min.js
+    //= require pusher.min
 
-Or install it yourself as:
+    // if you are using pusher.js + backbone.js
+    //= require backpusher
+    //= require underscore
 
-    $ gem install pusher_rails
+## New CDN Usage for Pusher
 
-## Usage
+This is a new feature added to help keep up with patch revisions to the pusher.js library.  If you use the CDN helper provided,
+your code will reference the latest 2.1.x version of the pusher.js library without you having to wait for this gem to update
+on *every* revision.
 
-TODO: Write usage instructions here
+##### Usage
 
-## Contributing
+Use this helper in your view templates.  The below example is in [SLIM](http://slim-lang.com/).
 
-1. Fork it
-2. Create your feature branch (`git checkout -b my-new-feature`)
-3. Commit your changes (`git commit -am 'Add some feature'`)
-4. Push to the branch (`git push origin my-new-feature`)
-5. Create new Pull Request
+```ruby
+doctype html
+html
+  head
+    title My Awesome App
+    = javascript_include_tag :application
+    = pusher_cdn_include_tag
+    = csrf_meta_tags
+    ...
+```
+
+#### Options
+
+The helper accepts one argument to switch between the HTTP & HTTPS CDN URLs.
+
+**use_ssl** (true || false)
+
+The default is false which renders the unsecure HTTP CDN URL.
+
+```ruby
+  = pusher_cdn_include_tag use_ssl: true
+```
+
+We are pointing to the [official Pusher CDN's](http://pusher.com/docs/client_libraries#js).
+
+Licenses
+========
+
+    /*!
+     * Pusher JavaScript Library v1.12.2
+     * http://pusherapp.com/
+     *
+     * Copyright 2011, Pusher
+     * Released under the MIT licence.
+     */
+
+    //     Backpusher.js 0.0.2
+    //     (c) 2011-2012 Pusher.
+    //     Backpusher may be freely distributed under the MIT license.
+    //     For all details and documentation:
+    //     http://github.com/pusher/backpusher
