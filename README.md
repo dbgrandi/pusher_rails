@@ -58,19 +58,10 @@ The default is false which renders the unsecure HTTP CDN URL.
 
 We are pointing to the [official Pusher CDN's](http://pusher.com/docs/client_libraries#js).
 
-Licenses
-========
+#### Licenses
 
-    /*!
-     * Pusher JavaScript Library v1.12.2
-     * http://pusherapp.com/
-     *
-     * Copyright 2011, Pusher
-     * Released under the MIT licence.
-     */
+The Pusher JavaScript library is released under the MIT license.
 
-    //     Backpusher.js 0.0.2
-    //     (c) 2011-2012 Pusher.
-    //     Backpusher may be freely distributed under the MIT license.
-    //     For all details and documentation:
-    //     http://github.com/pusher/backpusher
+The Backbone Pusher library is released under the MIT license.
+
+The Underscore library is released under the MIT license.
