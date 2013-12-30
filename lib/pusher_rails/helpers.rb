@@ -3,9 +3,15 @@
 module PusherRails
   module Helpers
     ## Return the script tag
+    ##
+    ## options
+    ## =====================
+    ## use_ssl (boolean)
+    ##
+    ## The CDN URL used for the include tag is determined by this option
+    ##
     def pusher_cdn_include_tag(options = {})
-      use_ssl = options.delete(:ssl) || false
-      url     = use_ssl ? URL[:https] : URL[:http]
+      url     = (options[:use_ssl] || false) ? URL[:https] : URL[:http]
       javascript_include_tag url
     end
   end
